@@ -1,0 +1,130 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mtbl23 <mtbl23@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 16:16:39 -0500
+Subject: [PATCH] Leaf port: cheaper per-chunk natural spawning bookkeeping
+
+- Skip building the PreCreatureSpawnEvent (Bukkit location and entity type
+  conversion) when no plugin listens to it. Ported from Leaf "Skip
+  PreCreatureSpawnEvent if no listeners", by Taiyou06 <kaandindar21@gmail.com>.
+- spawnForChunk fetched the nearby player list once per mob category per chunk
+  and read the Bukkit spawn limit (CraftWorld, two map lookups) per chunk and
+  category. The player list is now fetched once per chunk and the spawn limit
+  is read once per spawn state (one tick).
+
+Behaviour: identical, apart from a plugin changing a world's spawn limits in
+the middle of a tick taking effect on the next tick instead of the next chunk.
+Leaf: https://github.com/Winds-Studio/Leaf
+
+diff --git a/net/minecraft/world/level/NaturalSpawner.java b/net/minecraft/world/level/NaturalSpawner.java
+index 066871d580f837b69e1f2bcfa7026421bc47f838..411db7f3cdecb6d12bc4cc70b2dd71da728d9121 100644
+--- a/net/minecraft/world/level/NaturalSpawner.java
++++ b/net/minecraft/world/level/NaturalSpawner.java
+@@ -166,26 +166,35 @@ public final class NaturalSpawner {
+         ProfilerFiller profiler = Profiler.get();
+         profiler.push("spawner");
+ 
++        // Leaf port start - hoist the per-chunk lookups out of the per-category loop (same values, the chunk and the players do not change in between)
++        final boolean perPlayerMobSpawns = level.paperConfig().entities.spawning.perPlayerMobSpawns;
++        final net.minecraft.server.level.ChunkMap chunkMap = level.getChunkSource().chunkMap;
++        final net.minecraft.server.level.ServerPlayer[] inRangePlayers;
++        final int inRangeCount;
++        if (perPlayerMobSpawns) {
++            final ca.spottedleaf.moonrise.common.list.ReferenceList<net.minecraft.server.level.ServerPlayer> inRange =
++                level.moonrise$getNearbyPlayers().getPlayers(chunk.getPos(), ca.spottedleaf.moonrise.common.misc.NearbyPlayers.NearbyMapType.TICK_VIEW_DISTANCE);
++            inRangePlayers = inRange == null ? null : inRange.getRawDataUnchecked();
++            inRangeCount = inRange == null ? 0 : inRange.size();
++        } else {
++            inRangePlayers = null;
++            inRangeCount = 0;
++        }
++        // Leaf port end
++
+         for (MobCategory mobCategory : spawningCategories) {
+             // Paper start - Optional per player mob spawns
+             final boolean canSpawn;
+             int maxSpawns = Integer.MAX_VALUE;
+-            if (level.paperConfig().entities.spawning.perPlayerMobSpawns) {
++            if (perPlayerMobSpawns) {
+                 // Copied from getFilteredSpawningCategories
+-                int limit = mobCategory.getMaxInstancesPerChunk();
+-                org.bukkit.entity.SpawnCategory spawnCategory = org.bukkit.craftbukkit.util.CraftSpawnCategory.toBukkit(mobCategory);
+-                if (org.bukkit.craftbukkit.util.CraftSpawnCategory.isValidForLimits(spawnCategory)) {
+-                    limit = level.getWorld().getSpawnLimit(spawnCategory);
+-                }
++                int limit = state.spawnLimit(level, mobCategory); // Leaf port - per tick cache of the Bukkit spawn limit
+ 
+                 // Apply per-player limit
+                 int minDiff = Integer.MAX_VALUE;
+-                final ca.spottedleaf.moonrise.common.list.ReferenceList<net.minecraft.server.level.ServerPlayer> inRange =
+-                    level.moonrise$getNearbyPlayers().getPlayers(chunk.getPos(), ca.spottedleaf.moonrise.common.misc.NearbyPlayers.NearbyMapType.TICK_VIEW_DISTANCE);
+-                if (inRange != null) {
+-                    final net.minecraft.server.level.ServerPlayer[] backingSet = inRange.getRawDataUnchecked();
+-                    for (int k = 0, len = inRange.size(); k < len; k++) {
+-                        minDiff = Math.min(limit - level.getChunkSource().chunkMap.getMobCountNear(backingSet[k], mobCategory), minDiff);
++                if (inRangePlayers != null) {
++                    for (int k = 0, len = inRangeCount; k < len; k++) {
++                        minDiff = Math.min(limit - chunkMap.getMobCountNear(inRangePlayers[k], mobCategory), minDiff);
+                     }
+                 }
+ 
+@@ -196,7 +205,7 @@ public final class NaturalSpawner {
+             }
+             if (canSpawn) {
+                 spawnCategoryForChunk(mobCategory, level, chunk, state::canSpawn, state::afterSpawn,
+-                    maxSpawns, level.paperConfig().entities.spawning.perPlayerMobSpawns ? level.getChunkSource().chunkMap::updatePlayerMobTypeMap : null);
++                    maxSpawns, perPlayerMobSpawns ? chunkMap::updatePlayerMobTypeMap : null);
+                 // Paper end - Optional per player mob spawns
+             }
+         }
+@@ -395,6 +404,8 @@ public final class NaturalSpawner {
+     ) {
+         // Paper start - PreCreatureSpawnEvent
+         EntityType<?> type = currentSpawnData.type();
++        // Leaf port start - skip building the event (Bukkit location and entity type conversion) when nobody listens (Leaf "Skip PreCreatureSpawnEvent if no listeners", Taiyou06)
++        if (com.destroystokyo.paper.event.entity.PreCreatureSpawnEvent.getHandlerList().getRegisteredListeners().length != 0) {
+         com.destroystokyo.paper.event.entity.PreCreatureSpawnEvent event = new com.destroystokyo.paper.event.entity.PreCreatureSpawnEvent(
+                 org.bukkit.craftbukkit.util.CraftLocation.toBukkit(pos, level),
+                 org.bukkit.craftbukkit.entity.CraftEntityType.minecraftToBukkit(type), org.bukkit.event.entity.CreatureSpawnEvent.SpawnReason.NATURAL
+@@ -405,6 +416,8 @@ public final class NaturalSpawner {
+             }
+             return PreSpawnStatus.CANCELLED;
+         }
++        }
++        // Leaf port end
+         final boolean success = type.getCategory() != MobCategory.MISC
+         // Paper end - PreCreatureSpawnEvent
+             && (type.canSpawnFarFromPlayer() || !(nearestPlayerDistanceSqr > type.getCategory().getDespawnDistance() * type.getCategory().getDespawnDistance()))
+@@ -624,6 +637,8 @@ public final class NaturalSpawner {
+         private final PotentialCalculator spawnPotential;
+         private final Object2IntMap<MobCategory> unmodifiableMobCategoryCounts;
+         private final LocalMobCapCalculator localMobCapCalculator;
++        private final int[] spawnLimits = new int[MobCategory.values().length]; // Leaf port - lazily filled per tick, see spawnLimit
++        private final boolean[] spawnLimitKnown = new boolean[MobCategory.values().length]; // Leaf port
+         private @Nullable BlockPos lastCheckedPos;
+         private @Nullable EntityType<?> lastCheckedType;
+         private double lastCharge;
+@@ -677,6 +692,24 @@ public final class NaturalSpawner {
+             if (this.localMobCapCalculator != null) this.localMobCapCalculator.addMob(ChunkPos.containing(pos), category); // Paper - Optional per player mob spawns
+         }
+ 
++        // Leaf port start - the Bukkit per world spawn limit of a category, read once per spawn state (one tick) instead of once per chunk and category
++        private int spawnLimit(final ServerLevel level, final MobCategory mobCategory) {
++            int index = mobCategory.ordinal();
++            if (!this.spawnLimitKnown[index]) {
++                int limit = mobCategory.getMaxInstancesPerChunk();
++                org.bukkit.entity.SpawnCategory spawnCategory = org.bukkit.craftbukkit.util.CraftSpawnCategory.toBukkit(mobCategory);
++                if (org.bukkit.craftbukkit.util.CraftSpawnCategory.isValidForLimits(spawnCategory)) {
++                    limit = level.getWorld().getSpawnLimit(spawnCategory);
++                }
++
++                this.spawnLimits[index] = limit;
++                this.spawnLimitKnown[index] = true;
++            }
++
++            return this.spawnLimits[index];
++        }
++        // Leaf port end
++
+         public int getSpawnableChunkCount() {
+             return this.spawnableChunkCount;
+         }

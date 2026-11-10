@@ -1,0 +1,203 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mtbl23 <mtbl23@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 16:16:39 -0500
+Subject: [PATCH] Leaf port: skip the natural mob spawn cost lookup for types
+ without a cost
+
+NaturalSpawner#createState walks every loaded entity once per tick and, for
+each countable mob, asked the environment attribute system for the
+NATURAL_MOB_SPAWNS value at its position just to read its spawn cost. That is
+a full-resolution biome lookup (BiomeManager, a chunk lookup through the chunk
+system) per entity and was about a third of createState in the 12 bot Blitz
+profile. Only a handful of entity types (soul sand valley, basalt delta, warped
+forest mobs) have a cost in any biome.
+
+The attribute system now records, when it is built, the union of the entity
+types that have a spawn cost in its constant base value and in every biome's
+NATURAL_MOB_SPAWNS entry (overlay and override only ever produce a subset of
+that union). For any other type the cost is always null, so the lookup is
+skipped. If the layer setup is anything other than constant base plus the one
+biome layer, the set is unknown and every lookup is done as before.
+
+Behaviour: identical results. The same shortcut is used in SpawnState#canSpawn
+and #afterSpawn.
+
+Motivated by Leaf's mob spawning changes (async counting makes createState free
+in its profile); this is an independent, vanilla-identical implementation.
+Leaf: https://github.com/Winds-Studio/Leaf
+
+diff --git a/net/minecraft/world/attribute/EnvironmentAttributeSystem.java b/net/minecraft/world/attribute/EnvironmentAttributeSystem.java
+index b4a076292c17a9216764db4e0074315eca3127aa..6dd84328feba6164182ce871d17d7389936224e1 100644
+--- a/net/minecraft/world/attribute/EnvironmentAttributeSystem.java
++++ b/net/minecraft/world/attribute/EnvironmentAttributeSystem.java
+@@ -2,12 +2,14 @@ package net.minecraft.world.attribute;
+ 
+ import com.google.common.annotations.VisibleForTesting;
+ import it.unimi.dsi.fastutil.objects.Reference2ObjectOpenHashMap;
++import it.unimi.dsi.fastutil.objects.ReferenceOpenHashSet;
+ import java.util.ArrayList;
+ import java.util.Collection;
+ import java.util.HashMap;
+ import java.util.List;
+ import java.util.Map;
+ import java.util.Objects;
++import java.util.Set;
+ import java.util.stream.Stream;
+ import net.minecraft.SharedConstants;
+ import net.minecraft.core.Holder;
+@@ -19,7 +21,9 @@ import net.minecraft.world.clock.ClockManager;
+ import net.minecraft.world.level.Level;
+ import net.minecraft.world.level.LevelAccessor;
+ import net.minecraft.world.level.biome.Biome;
++import net.minecraft.world.entity.EntityType;
+ import net.minecraft.world.level.biome.BiomeManager;
++import net.minecraft.world.level.biome.MobSpawnSettings;
+ import net.minecraft.world.level.dimension.DimensionType;
+ import net.minecraft.world.phys.Vec3;
+ import net.minecraft.world.timeline.Timeline;
+@@ -27,8 +31,13 @@ import org.jspecify.annotations.Nullable;
+ 
+ public class EnvironmentAttributeSystem implements EnvironmentAttributeReader {
+     private final Map<EnvironmentAttribute<?>, EnvironmentAttributeSystem.ValueSampler<?>> attributeSamplers = new Reference2ObjectOpenHashMap<>();
++    // Leaf port start - skip the NATURAL_MOB_SPAWNS lookup for entity types that no biome gives a spawn cost (null = unknown, always look up)
++    private final @Nullable Set<EntityType<?>> naturalMobSpawnCostTypes;
++    // Leaf port end
+ 
+-    private EnvironmentAttributeSystem(final Map<EnvironmentAttribute<?>, List<EnvironmentAttributeLayer<?>>> layersByAttribute) {
++    private EnvironmentAttributeSystem(
++        final Map<EnvironmentAttribute<?>, List<EnvironmentAttributeLayer<?>>> layersByAttribute, final @Nullable Set<EntityType<?>> biomeSpawnCostTypes
++    ) {
+         layersByAttribute.forEach(
+             (attribute, layers) -> this.attributeSamplers
+                 .put(
+@@ -36,8 +45,34 @@ public class EnvironmentAttributeSystem implements EnvironmentAttributeReader {
+                     this.bakeLayerSampler((EnvironmentAttribute<?>)attribute, (List<? extends EnvironmentAttributeLayer<?>>)layers)
+                 )
+         );
++        this.naturalMobSpawnCostTypes = this.computeNaturalMobSpawnCostTypes(biomeSpawnCostTypes); // Leaf port
++    }
++
++    // Leaf port start - Inspired by Leaf's async/optimised mob counting (createState); independent, vanilla-identical implementation.
++    // A mob spawn cost can only come from the constant base value or from a biome's NATURAL_MOB_SPAWNS entry (overlay and override
++    // both only ever produce a subset of the union of their inputs' costs), so any type outside that union always yields a null cost.
++    private @Nullable Set<EntityType<?>> computeNaturalMobSpawnCostTypes(final @Nullable Set<EntityType<?>> biomeSpawnCostTypes) {
++        EnvironmentAttributeSystem.ValueSampler<?> sampler = this.attributeSamplers.get(EnvironmentAttributes.NATURAL_MOB_SPAWNS);
++        MobSpawnSettings base = sampler == null ? EnvironmentAttributes.NATURAL_MOB_SPAWNS.defaultValue() : (MobSpawnSettings)sampler.baseValue;
++        Set<EntityType<?>> types = new ReferenceOpenHashSet<>(base.allSpawnCosts().keySet());
++        if (sampler == null || sampler.layers.isEmpty()) {
++            return types;
++        }
++
++        if (biomeSpawnCostTypes != null && sampler.layers.size() == 1 && sampler.layers.getFirst() instanceof EnvironmentAttributeLayer.Positional) {
++            types.addAll(biomeSpawnCostTypes);
++            return types;
++        }
++
++        return null;
+     }
+ 
++    public boolean mayHaveNaturalMobSpawnCost(final EntityType<?> type) {
++        Set<EntityType<?>> types = this.naturalMobSpawnCostTypes;
++        return types == null || types.contains(type);
++    }
++    // Leaf port end
++
+     private <Value> EnvironmentAttributeSystem.ValueSampler<Value> bakeLayerSampler(
+         final EnvironmentAttribute<Value> attribute, final List<? extends EnvironmentAttributeLayer<?>> untypedLayers
+     ) {
+@@ -66,7 +101,26 @@ public class EnvironmentAttributeSystem implements EnvironmentAttributeReader {
+         BiomeManager biomeManager = level.getBiomeManager();
+         addDimensionLayer(builder, level.dimensionType());
+         addBiomeLayer(builder, registries.lookupOrThrow(Registries.BIOME), biomeManager);
++        builder.biomeSpawnCostTypes = collectBiomeSpawnCostTypes(registries.lookupOrThrow(Registries.BIOME)); // Leaf port
++    }
++
++    // Leaf port start
++    private static @Nullable Set<EntityType<?>> collectBiomeSpawnCostTypes(final HolderLookup<Biome> biomes) {
++        Set<EntityType<?>> types = new ReferenceOpenHashSet<>();
++        boolean[] known = {true};
++        biomes.listElements().forEach(biome -> {
++            EnvironmentAttributeMap.Entry<MobSpawnSettings, ?> entry = biome.value().getAttributes().get(EnvironmentAttributes.NATURAL_MOB_SPAWNS);
++            if (entry != null) {
++                if (entry.argument() instanceof MobSpawnSettings settings) {
++                    types.addAll(settings.allSpawnCosts().keySet());
++                } else {
++                    known[0] = false;
++                }
++            }
++        });
++        return known[0] ? types : null;
+     }
++    // Leaf port end
+ 
+     private static void addDynamicLayers(final EnvironmentAttributeSystem.Builder builder, final Level level) {
+         ClockManager clockManager = level.clockManager();
+@@ -143,6 +197,7 @@ public class EnvironmentAttributeSystem implements EnvironmentAttributeReader {
+ 
+     public static class Builder {
+         private final Map<EnvironmentAttribute<?>, List<EnvironmentAttributeLayer<?>>> layersByAttribute = new HashMap<>();
++        private @Nullable Set<EntityType<?>> biomeSpawnCostTypes; // Leaf port
+ 
+         private Builder() {
+         }
+@@ -220,7 +275,7 @@ public class EnvironmentAttributeSystem implements EnvironmentAttributeReader {
+         }
+ 
+         public EnvironmentAttributeSystem build() {
+-            return new EnvironmentAttributeSystem(this.layersByAttribute);
++            return new EnvironmentAttributeSystem(this.layersByAttribute, this.biomeSpawnCostTypes);
+         }
+     }
+ 
+diff --git a/net/minecraft/world/level/NaturalSpawner.java b/net/minecraft/world/level/NaturalSpawner.java
+index 06c63a3429d010546c8b9de610cbae7bf6bb6935..066871d580f837b69e1f2bcfa7026421bc47f838 100644
+--- a/net/minecraft/world/level/NaturalSpawner.java
++++ b/net/minecraft/world/level/NaturalSpawner.java
+@@ -97,8 +97,7 @@ public final class NaturalSpawner {
+                     // Paper end - Only count natural spawns
+                     BlockPos pos = entity.blockPosition();
+                     chunkGetter.query(ChunkPos.pack(pos), chunk -> {
+-                        MobSpawnSettings naturalMobSpawns = level.environmentAttributes().getValue(EnvironmentAttributes.NATURAL_MOB_SPAWNS, pos);
+-                        MobSpawnSettings.MobSpawnCost mobSpawnCost = naturalMobSpawns.getMobSpawnCost(entity.getType());
++                        MobSpawnSettings.MobSpawnCost mobSpawnCost = getNaturalMobSpawnCost(level, pos, entity.getType()); // Leaf port - skip biome lookup for types without a cost
+                         if (mobSpawnCost != null) {
+                             spawnPotential.addCharge(entity.blockPosition(), mobSpawnCost.charge());
+                         }
+@@ -121,6 +120,17 @@ public final class NaturalSpawner {
+         return new NaturalSpawner.SpawnState(spawnableChunkCount, mobCounts, spawnPotential, localMobCapCalculator);
+     }
+ 
++    // Leaf port start - see EnvironmentAttributeSystem#mayHaveNaturalMobSpawnCost
++    private static MobSpawnSettings.@Nullable MobSpawnCost getNaturalMobSpawnCost(final Level level, final BlockPos pos, final EntityType<?> type) {
++        net.minecraft.world.attribute.EnvironmentAttributeSystem attributes = level.environmentAttributes();
++        if (!attributes.mayHaveNaturalMobSpawnCost(type)) {
++            return null;
++        }
++
++        return attributes.getValue(EnvironmentAttributes.NATURAL_MOB_SPAWNS, pos).getMobSpawnCost(type);
++    }
++    // Leaf port end
++
+     public static List<MobCategory> getFilteredSpawningCategories(
+         final NaturalSpawner.SpawnState state, final boolean spawnFriendlies, final boolean spawnEnemies, final boolean spawnPersistent, final ServerLevel level // CraftBukkit - add level/spawnFriendlies
+     ) {
+@@ -634,8 +644,7 @@ public final class NaturalSpawner {
+         private boolean canSpawn(final EntityType<?> type, final Level level, final BlockPos testPos, final ChunkAccess chunk) {
+             this.lastCheckedPos = testPos;
+             this.lastCheckedType = type;
+-            MobSpawnSettings naturalMobSpawns = level.environmentAttributes().getValue(EnvironmentAttributes.NATURAL_MOB_SPAWNS, testPos);
+-            MobSpawnSettings.MobSpawnCost mobSpawnCost = naturalMobSpawns.getMobSpawnCost(type);
++            MobSpawnSettings.MobSpawnCost mobSpawnCost = getNaturalMobSpawnCost(level, testPos, type); // Leaf port - skip biome lookup for types without a cost
+             if (mobSpawnCost == null) {
+                 this.lastCharge = 0.0;
+                 return true;
+@@ -654,8 +663,7 @@ public final class NaturalSpawner {
+             if (pos.equals(this.lastCheckedPos) && type == this.lastCheckedType) {
+                 charge = this.lastCharge;
+             } else {
+-                MobSpawnSettings naturalMobSpawns = mob.level().environmentAttributes().getValue(EnvironmentAttributes.NATURAL_MOB_SPAWNS, pos);
+-                MobSpawnSettings.MobSpawnCost mobSpawnCost = naturalMobSpawns.getMobSpawnCost(type);
++                MobSpawnSettings.MobSpawnCost mobSpawnCost = getNaturalMobSpawnCost(mob.level(), pos, type); // Leaf port - skip biome lookup for types without a cost
+                 if (mobSpawnCost != null) {
+                     charge = mobSpawnCost.charge();
+                 } else {

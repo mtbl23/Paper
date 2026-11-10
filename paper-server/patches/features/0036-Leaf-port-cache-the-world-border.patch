@@ -1,0 +1,44 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mtbl23 <mtbl23@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 16:16:39 -0500
+Subject: [PATCH] Leaf port: cache the world border
+
+ServerLevel#getWorldBorder looked the border up in the saved data storage (a
+hash lookup) on every call, and it is called from the spawn path, entity
+ticking and block entity ticking. The border object lives as long as the
+level, so keep a reference after the first lookup.
+
+Behaviour: identical (same object, applyInitialSettings is a no-op after the first call).
+
+Ported from Leaf "Cache world border".
+Original patch by HaHaWTH <102713261+HaHaWTH@users.noreply.github.com>
+Leaf: https://github.com/Winds-Studio/Leaf (GPL-3.0-only with section 7(b) attribution term)
+
+diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
+index ea4cc487002a0edc54cc49bfbecf72be156b6af7..071230501800968cb8326dca78682406173aaadd 100644
+--- a/net/minecraft/server/level/ServerLevel.java
++++ b/net/minecraft/server/level/ServerLevel.java
+@@ -200,6 +200,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+     private final EntityTickList entityTickList = new EntityTickList();
+     private final ServerWaypointManager waypointManager;
+     private EnvironmentAttributeSystem environmentAttributes;
++    private @Nullable WorldBorder cachedWorldBorder; // Leaf port - cache world border
+     // Paper - rewrite chunk system
+     private final GameEventDispatcher gameEventDispatcher;
+     public boolean noSave;
+@@ -2547,8 +2548,15 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+ 
+     @Override
+     public WorldBorder getWorldBorder() {
++        // Leaf port start - cache world border (Leaf "Cache world border", HaHaWTH)
++        WorldBorder cached = this.cachedWorldBorder;
++        if (cached != null) {
++            return cached;
++        }
++        // Leaf port end - cache world border
+         WorldBorder worldBorder = this.getDataStorage().computeIfAbsent(WorldBorder.TYPE);
+         worldBorder.applyInitialSettings(this.levelData.getGameTime());
++        this.cachedWorldBorder = worldBorder; // Leaf port - cache world border
+         return worldBorder;
+     }
+ 
