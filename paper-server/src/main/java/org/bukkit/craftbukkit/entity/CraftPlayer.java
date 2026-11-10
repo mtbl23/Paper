@@ -2068,6 +2068,12 @@ public class CraftPlayer extends CraftHumanEntity implements Player, PluginMessa
 
     @Override
     public boolean canSee(org.bukkit.entity.Entity entity) {
+        // Leaf port start - no visibility overrides (the common case): skip the UUID lookup and test the cheap flag first; same result
+        // (Leaf/SparklyPaper "Optimize canSee checks", MrPowerGamerBR <git@mrpowergamerbr.com>)
+        if (this.invertedVisibilityEntities.isEmpty()) {
+            return entity.isVisibleByDefault() || this.equals(entity);
+        }
+        // Leaf port end
         return this.equals(entity) || entity.isVisibleByDefault() ^ this.invertedVisibilityEntities.containsKey(entity.getUniqueId()); // SPIGOT-7312: Can always see self
     }
 
