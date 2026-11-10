@@ -1,0 +1,25 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mtbl23 <mtbl23@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 16:20:08 -0500
+Subject: [PATCH] Leaf port: check the entity type before the distance in
+ SetLookAndInteract
+
+Both predicates are pure, so testing the cheap type check first gives the same
+result and skips a distance computation for most nearby entities.
+
+Ported from Leaf "Optimize SetLookAndInteract and NearestVisibleLivingEntities" by Taiyou06 <kaandindar21@gmail.com>.
+Leaf: https://github.com/Winds-Studio/Leaf
+
+diff --git a/net/minecraft/world/entity/ai/behavior/SetLookAndInteract.java b/net/minecraft/world/entity/ai/behavior/SetLookAndInteract.java
+index 71b8f9a7d4fe97f56fe1fc03b48e4dcd455ccd1e..6d2ac04efd0b4cb66547704163925898cb12a47d 100644
+--- a/net/minecraft/world/entity/ai/behavior/SetLookAndInteract.java
++++ b/net/minecraft/world/entity/ai/behavior/SetLookAndInteract.java
+@@ -20,7 +20,7 @@ public class SetLookAndInteract {
+                     i,
+                     (lookTarget, interactionTarget, nearestEntities) -> (level, body, timestamp) -> {
+                         Optional<LivingEntity> closest = i.<NearestVisibleLivingEntities>get(nearestEntities)
+-                            .findClosest(e -> e.distanceToSqr(body) <= interactionRangeSqr && e.is(type));
++                            .findClosest(e -> e.is(type) && e.distanceToSqr(body) <= interactionRangeSqr); // Leaf port - cheaper type check first (Leaf "Optimize SetLookAndInteract and NearestVisibleLivingEntities", Taiyou06); both tests are pure
+                         if (closest.isEmpty()) {
+                             return false;
+                         }

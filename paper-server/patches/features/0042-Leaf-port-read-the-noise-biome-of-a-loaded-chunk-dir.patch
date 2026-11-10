@@ -1,0 +1,35 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mtbl23 <mtbl23@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 16:23:01 -0500
+Subject: [PATCH] Leaf port: read the noise biome of a loaded chunk directly
+
+Level#getNoiseBiome (used by BiomeManager for every biome, environment
+attribute and mob spawn lookup) went through the generic chunk lookup with
+status BIOMES: chunk holder map lookup, getChunkIfPresent, and the
+ImposterProtoChunk wrapper that only delegates to the full chunk. If the full
+chunk is loaded it is now read straight from the full chunk map; every other
+case takes the old path.
+
+Behaviour: identical (the wrapper delegates to the same LevelChunk).
+
+Motivated by Leaf's chunk lookup patches ("optimize get chunk", "Optimize
+LevelChunk#getBlockStateFinal"); independent implementation.
+Leaf: https://github.com/Winds-Studio/Leaf
+
+diff --git a/net/minecraft/world/level/Level.java b/net/minecraft/world/level/Level.java
+index ab49bb83b51a3ac210f4c51ec48c11036912149e..2af453244f4e0a1cf0a56b7e41de28b7276bf04e 100644
+--- a/net/minecraft/world/level/Level.java
++++ b/net/minecraft/world/level/Level.java
+@@ -816,6 +816,12 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+      */
+     @Override
+     public Holder<Biome> getNoiseBiome(final int x, final int y, final int z) {
++        // Leaf port start - a loaded full chunk is looked up directly instead of through the chunk holder (same data, the status BIOMES wrapper just delegates to it)
++        final LevelChunk fullChunk = ((ServerLevel)this).getChunkSource().getChunkAtIfLoadedImmediately(x >> 2, z >> 2);
++        if (fullChunk != null) {
++            return fullChunk.getNoiseBiome(x, y, z);
++        }
++        // Leaf port end
+         final ChunkAccess chunk = this.getChunk(x >> 2, z >> 2, ChunkStatus.BIOMES, false);
+ 
+         return chunk != null ? chunk.getNoiseBiome(x, y, z) : this.getUncachedNoiseBiome(x, y, z);

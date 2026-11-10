@@ -1,0 +1,84 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mtbl23 <mtbl23@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 16:23:01 -0500
+Subject: [PATCH] Leaf port: prune biome fiddle corners that cannot win
+
+BiomeManager#getBiome evaluates the 8 surrounding quart corners, each with 6
+LCG steps for the random fiddle. The fiddle is at most 0.45 per axis, so a
+corner whose geometric distance lower bound already exceeds the best distance
+so far cannot win and is skipped. The quarter fractions come from a table
+instead of divisions.
+
+Behaviour: identical results (strict comparison, so ties still go to the
+lowest corner index). Checked with a differential test of the old and new loop
+over 40 million random positions and 200 random seeds: 0 mismatches.
+
+Ported from Leaf "Carpet-Fixes: Optimized getBiome method", by nostalgic853 <yuu8583@proton.me>,
+co-authored by HaHaWTH <102713261+HaHaWTH@users.noreply.github.com>; original
+mixin from Carpet Fixes by FxMorin (MIT, https://github.com/fxmorin/carpet-fixes).
+Leaf: https://github.com/Winds-Studio/Leaf
+
+diff --git a/net/minecraft/world/level/biome/BiomeManager.java b/net/minecraft/world/level/biome/BiomeManager.java
+index 65ac39fd0e481b83cb9fad00b6482051dce20759..52561dd8686a8429f5995d0f8cc0bdf4786f641c 100644
+--- a/net/minecraft/world/level/biome/BiomeManager.java
++++ b/net/minecraft/world/level/biome/BiomeManager.java
+@@ -32,6 +32,13 @@ public class BiomeManager {
+         return this.getBiome(pos.getX(), pos.getY(), pos.getZ());
+     }
+ 
++    // Leaf port start - Adapted from Leaf "Carpet-Fixes: Optimized getBiome method" (nostalgic853, HaHaWTH; MIT, from Carpet Fixes by FxMorin,
++    // https://github.com/fxmorin/carpet-fixes): corners whose geometric lower bound already loses against the best corner so far skip the
++    // random fiddle (6 LCG steps). The fiddle is at most 0.45 per axis, so a corner whose axis distance minus 0.45 squared already exceeds the
++    // best distance cannot win. Results are identical to the vanilla loop (ties still go to the lowest corner index).
++    private static final double MAX_FIDDLE = 0.4500000001;
++    private static final double[] QUARTERS = {0.0, 0.25, 0.5, 0.75};
++
+     public Holder<Biome> getBiome(final int x, final int y, final int z) {
+         int absX = x - 2;
+         int absY = y - 2;
+@@ -39,9 +46,9 @@ public class BiomeManager {
+         int parentX = absX >> 2;
+         int parentY = absY >> 2;
+         int parentZ = absZ >> 2;
+-        double fractX = (absX & 3) / 4.0;
+-        double fractY = (absY & 3) / 4.0;
+-        double fractZ = (absZ & 3) / 4.0;
++        double fractX = QUARTERS[absX & 3];
++        double fractY = QUARTERS[absY & 3];
++        double fractZ = QUARTERS[absZ & 3];
+         int minI = 0;
+         double minFiddledDistance = Double.POSITIVE_INFINITY;
+ 
+@@ -49,12 +56,21 @@ public class BiomeManager {
+             boolean xEven = (i & 4) == 0;
+             boolean yEven = (i & 2) == 0;
+             boolean zEven = (i & 1) == 0;
+-            int cornerX = xEven ? parentX : parentX + 1;
+-            int cornerY = yEven ? parentY : parentY + 1;
+-            int cornerZ = zEven ? parentZ : parentZ + 1;
+             double distanceX = xEven ? fractX : fractX - 1.0;
+             double distanceY = yEven ? fractY : fractY - 1.0;
+             double distanceZ = zEven ? fractZ : fractZ - 1.0;
++            if (i != 0) {
++                double lowerX = Math.max(Math.abs(distanceX) - MAX_FIDDLE, 0.0);
++                double lowerY = Math.max(Math.abs(distanceY) - MAX_FIDDLE, 0.0);
++                double lowerZ = Math.max(Math.abs(distanceZ) - MAX_FIDDLE, 0.0);
++                if (minFiddledDistance < Mth.square(lowerZ) + Mth.square(lowerY) + Mth.square(lowerX)) {
++                    continue;
++                }
++            }
++
++            int cornerX = xEven ? parentX : parentX + 1;
++            int cornerY = yEven ? parentY : parentY + 1;
++            int cornerZ = zEven ? parentZ : parentZ + 1;
+             double next = getFiddledDistance(this.biomeZoomSeed, cornerX, cornerY, cornerZ, distanceX, distanceY, distanceZ);
+             if (minFiddledDistance > next) {
+                 minI = i;
+@@ -67,6 +83,7 @@ public class BiomeManager {
+         int biomeZ = (minI & 1) == 0 ? parentZ : parentZ + 1;
+         return this.noiseBiomeSource.getNoiseBiome(biomeX, biomeY, biomeZ);
+     }
++    // Leaf port end
+ 
+     public Holder<Biome> getNoiseBiomeAtPosition(final double x, final double y, final double z) {
+         int quartX = QuartPos.fromBlock(Mth.floor(x));

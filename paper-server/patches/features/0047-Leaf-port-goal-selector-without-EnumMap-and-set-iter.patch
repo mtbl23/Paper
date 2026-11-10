@@ -1,0 +1,156 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mtbl23 <mtbl23@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 16:25:36 -0500
+Subject: [PATCH] Leaf port: goal selector without EnumMap and set iterators
+
+GoalSelector#tick ran four passes per mob per tick over an
+ObjectLinkedOpenHashSet (allocating an iterator each time) and kept the locked
+flags in an EnumMap. The goals are now walked as an array snapshot in the same
+(insertion) order, rebuilt when goals are added or removed, and the locked flags
+are an array indexed by flag ordinal. A free flag still behaves as the NO_GOAL
+placeholder.
+
+Behaviour: identical order of evaluation and the same decisions; the live
+set is still returned by getAvailableGoals.
+
+Adapted from Leaf "optimize goal selector" by hayanesuru <hayanesuru@outlook.jp>
+(Leaf additionally caches the interruptibility and priority of the locked goals
+per tick; that is not ported because it can differ from the vanilla result when
+a goal changes its interruptibility during the update loop).
+Leaf: https://github.com/Winds-Studio/Leaf
+
+diff --git a/net/minecraft/world/entity/ai/goal/GoalSelector.java b/net/minecraft/world/entity/ai/goal/GoalSelector.java
+index 0439543fbb25ddb974550fe9dbdaa479e330937d..f74dadb149ae79f542d8ab3f11150ea848554b06 100644
+--- a/net/minecraft/world/entity/ai/goal/GoalSelector.java
++++ b/net/minecraft/world/entity/ai/goal/GoalSelector.java
+@@ -21,24 +21,44 @@ public class GoalSelector {
+             return false;
+         }
+     };
+-    private final Map<Goal.Flag, WrappedGoal> lockedFlags = new EnumMap<>(Goal.Flag.class);
+-    private final Set<WrappedGoal> availableGoals = new ObjectLinkedOpenHashSet<>();
+     private static final Goal.Flag[] GOAL_FLAG_VALUES = Goal.Flag.values(); // Paper - remove streams from GoalSelector
++    // Leaf port start - Adapted from Leaf "optimize goal selector" (hayanesuru): the locked flags are an array indexed by flag ordinal instead of an
++    // EnumMap, and the goals are walked as an array snapshot (same insertion order) instead of with ObjectLinkedOpenHashSet iterators.
++    private final WrappedGoal[] lockedFlags = new WrappedGoal[GOAL_FLAG_VALUES.length];
++    private WrappedGoal[] goalArray = new WrappedGoal[0];
++    private boolean goalArrayDirty;
++    // Leaf port end
++    private final Set<WrappedGoal> availableGoals = new ObjectLinkedOpenHashSet<>();
+     private final ca.spottedleaf.moonrise.common.set.OptimizedSmallEnumSet<net.minecraft.world.entity.ai.goal.Goal.Flag> goalTypes = new ca.spottedleaf.moonrise.common.set.OptimizedSmallEnumSet<>(Goal.Flag.class); // Paper - remove streams from GoalSelector
+     private int curRate; // Paper - EAR 2
+ 
+     public void addGoal(final int prio, final Goal goal) {
+         this.availableGoals.add(new WrappedGoal(prio, goal));
++        this.goalArrayDirty = true; // Leaf port
++    }
++
++    // Leaf port start - the goals in insertion order; rebuilt after any change (also if the live set was changed through getAvailableGoals)
++    private WrappedGoal[] goals() {
++        WrappedGoal[] goals = this.goalArray;
++        if (this.goalArrayDirty || goals.length != this.availableGoals.size()) {
++            goals = this.availableGoals.toArray(new WrappedGoal[0]);
++            this.goalArray = goals;
++            this.goalArrayDirty = false;
++        }
++
++        return goals;
+     }
++    // Leaf port end
+ 
+     public void removeAllGoals(final Predicate<Goal> predicate) {
+-        for (WrappedGoal availableGoal : this.availableGoals) {
++        for (WrappedGoal availableGoal : this.goals()) { // Leaf port
+             if (predicate.test(availableGoal.getGoal()) && availableGoal.isRunning()) {
+                 availableGoal.stop();
+             }
+         }
+ 
+         this.availableGoals.removeIf(goal -> predicate.test(goal.getGoal()));
++        this.goalArrayDirty = true; // Leaf port
+     }
+ 
+     // Paper start - EAR 2
+@@ -48,7 +68,7 @@ public class GoalSelector {
+     }
+ 
+     public boolean hasTasks() {
+-        for (final WrappedGoal task : this.availableGoals) {
++        for (final WrappedGoal task : this.goals()) { // Leaf port
+             if (task.isRunning()) {
+                 return true;
+             }
+@@ -66,14 +86,15 @@ public class GoalSelector {
+         return goal.getFlags().hasCommonElements(disabledFlags);
+     }
+ 
+-    private static boolean goalCanBeReplacedForAllFlags(final WrappedGoal goal, final Map<Goal.Flag, WrappedGoal> lockedFlags) {
++    private static boolean goalCanBeReplacedForAllFlags(final WrappedGoal goal, final WrappedGoal[] lockedFlags) { // Leaf port
+         long flagIterator = goal.getFlags().getBackingSet();
+         final int flagSize = goal.getFlags().size();
+         for (int i = 0; i < flagSize; ++i) {
+             final Goal.Flag flag = GOAL_FLAG_VALUES[Long.numberOfTrailingZeros(flagIterator)];
+             flagIterator ^= ca.spottedleaf.common.util.IntegerUtil.getTrailingBit(flagIterator);
+             // Paper end - Perf: optimize goal types
+-            if (!lockedFlags.getOrDefault(flag, NO_GOAL).canBeReplacedBy(goal)) {
++            final WrappedGoal locked = lockedFlags[flag.ordinal()]; // Leaf port - a free flag is NO_GOAL
++            if (!(locked == null ? NO_GOAL : locked).canBeReplacedBy(goal)) {
+                 return false;
+             }
+         }
+@@ -85,28 +106,39 @@ public class GoalSelector {
+         ProfilerFiller profiler = Profiler.get();
+         profiler.push("goalCleanup");
+ 
+-        for (WrappedGoal goal : this.availableGoals) {
++        final WrappedGoal[] goals = this.goals(); // Leaf port
++        for (WrappedGoal goal : goals) {
+             if (goal.isRunning() && (goalContainsAnyFlags(goal, this.goalTypes) || !goal.canContinueToUse())) { // Paper - Perf: optimize goal types by removing streams
+                 goal.stop();
+             }
+         }
+ 
+-        this.lockedFlags.entrySet().removeIf(entry -> !entry.getValue().isRunning());
++        // Leaf port start
++        final WrappedGoal[] lockedFlags = this.lockedFlags;
++        for (int i = 0; i < lockedFlags.length; i++) {
++            final WrappedGoal locked = lockedFlags[i];
++            if (locked != null && !locked.isRunning()) {
++                lockedFlags[i] = null;
++            }
++        }
++        // Leaf port end
+         profiler.pop();
+         profiler.push("goalUpdate");
+ 
+-        for (WrappedGoal goal : this.availableGoals) {
++        for (WrappedGoal goal : goals) { // Leaf port
+             // Paper start
+-            if (!goal.isRunning() && !goalContainsAnyFlags(goal, this.goalTypes) && goalCanBeReplacedForAllFlags(goal, this.lockedFlags) && goal.canUse()) {
++            if (!goal.isRunning() && !goalContainsAnyFlags(goal, this.goalTypes) && goalCanBeReplacedForAllFlags(goal, lockedFlags) && goal.canUse()) {
+                 long flagIterator = goal.getFlags().getBackingSet();
+                 int wrappedGoalSize = goal.getFlags().size();
+                 for (int i = 0; i < wrappedGoalSize; ++i) {
+                     final Goal.Flag flag = GOAL_FLAG_VALUES[Long.numberOfTrailingZeros(flagIterator)];
+                     flagIterator ^= ca.spottedleaf.common.util.IntegerUtil.getTrailingBit(flagIterator);
+                     // Paper end
+-                    WrappedGoal currentGoal = this.lockedFlags.getOrDefault(flag, NO_GOAL);
+-                    currentGoal.stop();
+-                    this.lockedFlags.put(flag, goal);
++                    WrappedGoal currentGoal = lockedFlags[flag.ordinal()]; // Leaf port
++                    if (currentGoal != null) {
++                        currentGoal.stop();
++                    }
++                    lockedFlags[flag.ordinal()] = goal; // Leaf port
+                 }
+ 
+                 goal.start();
+@@ -121,7 +153,7 @@ public class GoalSelector {
+         ProfilerFiller profiler = Profiler.get();
+         profiler.push("goalTick");
+ 
+-        for (WrappedGoal goal : this.availableGoals) {
++        for (WrappedGoal goal : this.goals()) { // Leaf port
+             if (goal.isRunning() && (forceTickAllRunningGoals || goal.requiresUpdateEveryTick())) {
+                 goal.tick();
+             }

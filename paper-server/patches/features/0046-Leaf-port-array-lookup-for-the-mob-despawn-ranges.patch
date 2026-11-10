@@ -1,0 +1,33 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mtbl23 <mtbl23@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 16:25:36 -0500
+Subject: [PATCH] Leaf port: array lookup for the mob despawn ranges
+
+Mob#checkDespawn runs for every mob every tick and looked the despawn range pair
+of its category up in a HashMap keyed by an enum (identity hashing). The world
+configuration now keeps the same pairs in an array indexed by category ordinal,
+filled when the config is (re)loaded; the map stays as the fallback.
+
+Behaviour: identical.
+
+Motivated by Leaf's despawn patches ("optimize mob despawn", "Rewrite entity despawn time"); independent implementation.
+Leaf: https://github.com/Winds-Studio/Leaf
+
+diff --git a/net/minecraft/world/entity/Mob.java b/net/minecraft/world/entity/Mob.java
+index 92ce15b22517bda5033e6377c76abaa6a9d68d03..0e928f7c38e7cf32bcc7412ac413b3ebdc9674c9 100644
+--- a/net/minecraft/world/entity/Mob.java
++++ b/net/minecraft/world/entity/Mob.java
+@@ -787,8 +787,11 @@ public abstract class Mob extends LivingEntity implements Targeting, EquipmentUs
+             Entity player = this.level().findNearbyPlayer(this, -1.0, EntitySelector.PLAYER_AFFECTS_SPAWNING); // Paper - Affects Spawning API
+             if (player != null) {
+                 // Paper start - Configurable despawn distances
+-                final io.papermc.paper.configuration.WorldConfiguration.Entities.Spawning.DespawnRangePair despawnRangePair = this.level().paperConfig().entities.spawning.despawnRanges.get(this.getType().getCategory());
+-                final io.papermc.paper.configuration.type.DespawnRange.Shape shape = this.level().paperConfig().entities.spawning.despawnRangeShape;
++                // Leaf port start - category array lookup instead of the enum keyed HashMap
++                final io.papermc.paper.configuration.WorldConfiguration.Entities.Spawning spawningConfig = this.level().paperConfig().entities.spawning;
++                final io.papermc.paper.configuration.WorldConfiguration.Entities.Spawning.DespawnRangePair despawnRangePair = spawningConfig.despawnRange(this.getType().getCategory());
++                final io.papermc.paper.configuration.type.DespawnRange.Shape shape = spawningConfig.despawnRangeShape;
++                // Leaf port end
+                 final double dy = Math.abs(player.getY() - this.getY());
+                 final double dySqr = Mth.square(dy);
+                 final double dxSqr = Mth.square(player.getX() - this.getX());

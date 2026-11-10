@@ -1,0 +1,43 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mtbl23 <mtbl23@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 16:23:01 -0500
+Subject: [PATCH] Leaf port: check the targeting range before computing the
+ visibility
+
+TargetingConditions#test computed LivingEntity#getVisibilityPercent (a loop
+over all equipment slots with component lookups) for every candidate target
+before comparing the distance. The visibility is clamped to 10, so a target that
+is out of range even at the maximum visibility is now rejected first. The
+targeting goals (NearestAttackableTargetGoal, ...) test every nearby entity.
+
+Behaviour: identical results.
+
+Ported from Leaf/Gale "Check targeting range before getting visibility" by Martijn Muijsers
+<martijnmuijsers@live.nl>, based on Airplane "Early return optimization for target
+finding" by Paul Sauve <paul@technove.co> (GPL-3.0-only, Copyright (C) 2020 Technove LLC).
+Leaf: https://github.com/Winds-Studio/Leaf
+
+diff --git a/net/minecraft/world/entity/ai/targeting/TargetingConditions.java b/net/minecraft/world/entity/ai/targeting/TargetingConditions.java
+index bd6d9fdeb468428bdf35e888be141293088228a4..28c7f12039931b621983594cfb53f9e7d979f2db 100644
+--- a/net/minecraft/world/entity/ai/targeting/TargetingConditions.java
++++ b/net/minecraft/world/entity/ai/targeting/TargetingConditions.java
+@@ -79,9 +79,18 @@ public class TargetingConditions {
+             }
+ 
+             if (this.range > 0.0) {
++                double distanceToSqr = targeter.distanceToSqr(target.getX(), target.getY(), target.getZ());
++                // Leaf port start - reject targets that are out of range even at the maximum visibility (LivingEntity#getVisibilityPercent is clamped to
++                // MobVisibility.MAX_VISIBILITY) before computing the visibility, which loops over all equipment slots (Leaf/Gale "Check targeting range before
++                // getting visibility", based on Airplane "Early return optimization for target finding" by Paul Sauve; GPL-3.0-only)
++                double maxVisibilityDistance = Math.max(this.range * (this.testInvisible ? net.minecraft.world.item.component.MobVisibility.MAX_VISIBILITY : 1.0), 2.0);
++                if (distanceToSqr > maxVisibilityDistance * maxVisibilityDistance) {
++                    return false;
++                }
++                // Leaf port end
++
+                 double modifier = this.testInvisible ? target.getVisibilityPercent(level, targeter) : 1.0;
+                 double visibilityDistance = Math.max(this.range * modifier, 2.0);
+-                double distanceToSqr = targeter.distanceToSqr(target.getX(), target.getY(), target.getZ());
+                 if (distanceToSqr > visibilityDistance * visibilityDistance) {
+                     return false;
+                 }

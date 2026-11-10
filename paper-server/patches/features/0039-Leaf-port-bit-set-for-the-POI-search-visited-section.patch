@@ -1,0 +1,164 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mtbl23 <mtbl23@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 16:20:08 -0500
+Subject: [PATCH] Leaf port: bit set for the POI search visited sections
+
+PoiAccess#findNearestPoiRecords and #findAnyPoiRecords (the villager POI
+breadth first searches) tracked visited chunk sections in a LongOpenHashSet and
+queued all 6 neighbours through a 3x3x3 loop, including sections outside the
+search box which were then dropped when dequeued. Use a bit set over the search
+box (io.papermc.paper.leafport.SectionVisitSet), only queue in-box neighbours,
+and unroll the neighbour loop in the same visiting order (Z-, X-, Y-, Y+, X+, Z+).
+
+Behaviour: identical visiting order and results.
+
+Ported from Leaf "Optimize PoiAccess visited section tracking".
+Original patch by HaHaWTH <102713261+HaHaWTH@users.noreply.github.com>, co-authored by MrlingXD <90316914+wling-art@users.noreply.github.com>
+Leaf: https://github.com/Winds-Studio/Leaf (GPL-3.0-only with section 7(b) attribution term)
+
+diff --git a/ca/spottedleaf/moonrise/patches/poi_lookup/PoiAccess.java b/ca/spottedleaf/moonrise/patches/poi_lookup/PoiAccess.java
+index 85d80b3952a76b0ca7f67401a659cf35dd55b082..7bccd87ecdcf3d84c93ad0685b814335441deb5e 100644
+--- a/ca/spottedleaf/moonrise/patches/poi_lookup/PoiAccess.java
++++ b/ca/spottedleaf/moonrise/patches/poi_lookup/PoiAccess.java
+@@ -117,8 +117,10 @@ public final class PoiAccess {
+         final long centerKey = CoordinateUtils.getChunkSectionKey(centerX, centerY, centerZ);
+ 
+         final LongArrayFIFOQueue queue = new LongArrayFIFOQueue();
+-        final LongOpenHashSet seen = new LongOpenHashSet();
+-        seen.add(centerKey);
++        // Leaf port start - bit set for the visited sections (Leaf "Optimize PoiAccess visited section tracking", HaHaWTH)
++        final io.papermc.paper.leafport.SectionVisitSet seen = new io.papermc.paper.leafport.SectionVisitSet(lowerX, lowerY, lowerZ, upperX, upperY, upperZ);
++        seen.mark(centerX, centerY, centerZ);
++        // Leaf port end
+         queue.enqueue(centerKey);
+ 
+         while (!queue.isEmpty()) {
+@@ -127,11 +129,7 @@ public final class PoiAccess {
+             final int sectionY = CoordinateUtils.getChunkSectionY(key);
+             final int sectionZ = CoordinateUtils.getChunkSectionZ(key);
+ 
+-            if (sectionX < lowerX || sectionX > upperX || sectionY < lowerY || sectionY > upperY || sectionZ < lowerZ || sectionZ > upperZ) {
+-                // out of bound chunk
+-                continue;
+-            }
+-
++            // Leaf port - the out of bounds check is not needed any more, only in bounds neighbours are queued
+             final double sectionDistanceSquared = getSmallestDistanceSquared(
+                     (double)(sectionX << 4),
+                     (double)(sectionY << 4),
+@@ -145,26 +143,24 @@ public final class PoiAccess {
+                 continue;
+             }
+ 
+-            // queue all neighbours
+-            for (int dz = -1; dz <= 1; ++dz) {
+-                for (int dx = -1; dx <= 1; ++dx) {
+-                    for (int dy = -1; dy <= 1; ++dy) {
+-                        // -1 and 1 have the 1st bit set. so just add up the first bits, and it will tell us how many
+-                        // values are set. we only care about cardinal neighbours, so, we only care if one value is set
+-                        if ((dx & 1) + (dy & 1) + (dz & 1) != 1) {
+-                            continue;
+-                        }
+-
+-                        final int neighbourX = sectionX + dx;
+-                        final int neighbourY = sectionY + dy;
+-                        final int neighbourZ = sectionZ + dz;
+-
+-                        final long neighbourKey = CoordinateUtils.getChunkSectionKey(neighbourX, neighbourY, neighbourZ);
+-                        if (seen.add(neighbourKey)) {
+-                            queue.enqueue(neighbourKey);
+-                        }
+-                    }
+-                }
++            // queue all neighbours, in the same order as the old dz/dx/dy loop: Z-, X-, Y-, Y+, X+, Z+ (Leaf port: unrolled, in bounds only)
++            if (sectionZ > lowerZ && seen.mark(sectionX, sectionY, sectionZ - 1)) {
++                queue.enqueue(CoordinateUtils.getChunkSectionKey(sectionX, sectionY, sectionZ - 1));
++            }
++            if (sectionX > lowerX && seen.mark(sectionX - 1, sectionY, sectionZ)) {
++                queue.enqueue(CoordinateUtils.getChunkSectionKey(sectionX - 1, sectionY, sectionZ));
++            }
++            if (sectionY > lowerY && seen.mark(sectionX, sectionY - 1, sectionZ)) {
++                queue.enqueue(CoordinateUtils.getChunkSectionKey(sectionX, sectionY - 1, sectionZ));
++            }
++            if (sectionY < upperY && seen.mark(sectionX, sectionY + 1, sectionZ)) {
++                queue.enqueue(CoordinateUtils.getChunkSectionKey(sectionX, sectionY + 1, sectionZ));
++            }
++            if (sectionX < upperX && seen.mark(sectionX + 1, sectionY, sectionZ)) {
++                queue.enqueue(CoordinateUtils.getChunkSectionKey(sectionX + 1, sectionY, sectionZ));
++            }
++            if (sectionZ < upperZ && seen.mark(sectionX, sectionY, sectionZ + 1)) {
++                queue.enqueue(CoordinateUtils.getChunkSectionKey(sectionX, sectionY, sectionZ + 1));
+             }
+ 
+             final Optional<PoiSection> poiSectionOptional = load ? poiStorage.getOrLoad(key) : poiStorage.get(key);
+@@ -360,8 +356,10 @@ public final class PoiAccess {
+         final long centerKey = CoordinateUtils.getChunkSectionKey(centerX, centerY, centerZ);
+ 
+         final LongArrayFIFOQueue queue = new LongArrayFIFOQueue();
+-        final LongOpenHashSet seen = new LongOpenHashSet();
+-        seen.add(centerKey);
++        // Leaf port start - bit set for the visited sections (Leaf "Optimize PoiAccess visited section tracking", HaHaWTH)
++        final io.papermc.paper.leafport.SectionVisitSet seen = new io.papermc.paper.leafport.SectionVisitSet(lowerX, lowerY, lowerZ, upperX, upperY, upperZ);
++        seen.mark(centerX, centerY, centerZ);
++        // Leaf port end
+         queue.enqueue(centerKey);
+ 
+         while (!queue.isEmpty()) {
+@@ -370,11 +368,7 @@ public final class PoiAccess {
+             final int sectionY = CoordinateUtils.getChunkSectionY(key);
+             final int sectionZ = CoordinateUtils.getChunkSectionZ(key);
+ 
+-            if (sectionX < lowerX || sectionX > upperX || sectionY < lowerY || sectionY > upperY || sectionZ < lowerZ || sectionZ > upperZ) {
+-                // out of bound chunk
+-                continue;
+-            }
+-
++            // Leaf port - the out of bounds check is not needed any more, only in bounds neighbours are queued
+             final double sectionDistanceSquared = getSmallestDistanceSquared(
+                     (double)(sectionX << 4),
+                     (double)(sectionY << 4),
+@@ -389,26 +383,24 @@ public final class PoiAccess {
+                 continue;
+             }
+ 
+-            // queue all neighbours
+-            for (int dz = -1; dz <= 1; ++dz) {
+-                for (int dx = -1; dx <= 1; ++dx) {
+-                    for (int dy = -1; dy <= 1; ++dy) {
+-                        // -1 and 1 have the 1st bit set. so just add up the first bits, and it will tell us how many
+-                        // values are set. we only care about cardinal neighbours, so, we only care if one value is set
+-                        if ((dx & 1) + (dy & 1) + (dz & 1) != 1) {
+-                            continue;
+-                        }
+-
+-                        final int neighbourX = sectionX + dx;
+-                        final int neighbourY = sectionY + dy;
+-                        final int neighbourZ = sectionZ + dz;
+-
+-                        final long neighbourKey = CoordinateUtils.getChunkSectionKey(neighbourX, neighbourY, neighbourZ);
+-                        if (seen.add(neighbourKey)) {
+-                            queue.enqueue(neighbourKey);
+-                        }
+-                    }
+-                }
++            // queue all neighbours, in the same order as the old dz/dx/dy loop: Z-, X-, Y-, Y+, X+, Z+ (Leaf port: unrolled, in bounds only)
++            if (sectionZ > lowerZ && seen.mark(sectionX, sectionY, sectionZ - 1)) {
++                queue.enqueue(CoordinateUtils.getChunkSectionKey(sectionX, sectionY, sectionZ - 1));
++            }
++            if (sectionX > lowerX && seen.mark(sectionX - 1, sectionY, sectionZ)) {
++                queue.enqueue(CoordinateUtils.getChunkSectionKey(sectionX - 1, sectionY, sectionZ));
++            }
++            if (sectionY > lowerY && seen.mark(sectionX, sectionY - 1, sectionZ)) {
++                queue.enqueue(CoordinateUtils.getChunkSectionKey(sectionX, sectionY - 1, sectionZ));
++            }
++            if (sectionY < upperY && seen.mark(sectionX, sectionY + 1, sectionZ)) {
++                queue.enqueue(CoordinateUtils.getChunkSectionKey(sectionX, sectionY + 1, sectionZ));
++            }
++            if (sectionX < upperX && seen.mark(sectionX + 1, sectionY, sectionZ)) {
++                queue.enqueue(CoordinateUtils.getChunkSectionKey(sectionX + 1, sectionY, sectionZ));
++            }
++            if (sectionZ < upperZ && seen.mark(sectionX, sectionY, sectionZ + 1)) {
++                queue.enqueue(CoordinateUtils.getChunkSectionKey(sectionX, sectionY, sectionZ + 1));
+             }
+ 
+             final Optional<PoiSection> poiSectionOptional = load ? poiStorage.getOrLoad(key) : poiStorage.get(key);

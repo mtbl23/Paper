@@ -1,0 +1,33 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mtbl23 <mtbl23@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 16:23:01 -0500
+Subject: [PATCH] Leaf port: skip the frozen ticks write when nothing changes
+
+LivingEntity#aiStep decremented the frozen ticks of every living entity on
+every tick, boxing the value and going through SynchedEntityData#set (which
+ignores equal values) even when the entity was not frozen. Only write when the
+value is non-zero.
+
+Behaviour: identical.
+
+Ported from Leaf "Only update frozen ticks if changed" by hayanesuru <hayanesuru@outlook.jp>.
+Leaf: https://github.com/Winds-Studio/Leaf
+
+diff --git a/net/minecraft/world/entity/LivingEntity.java b/net/minecraft/world/entity/LivingEntity.java
+index a0d10e4c3f78128029125bae8e8e476208f28d42..59cac2f3b12d1d6ab5a715ceff01774bf54b3506 100644
+--- a/net/minecraft/world/entity/LivingEntity.java
++++ b/net/minecraft/world/entity/LivingEntity.java
+@@ -3800,7 +3800,12 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+         if (this.level() instanceof ServerLevel serverLevel) {
+             profiler.push("freezing");
+             if ((!this.isInPowderSnow || !this.canFreeze()) && !this.freezeLocked) { // Paper - Freeze Tick Lock API
+-                this.setTicksFrozen(Math.max(0, this.getTicksFrozen() - 2));
++                // Leaf port start - only write the frozen ticks when they change (Leaf "Only update frozen ticks if changed", hayanesuru; SynchedEntityData#set ignored equal values anyway)
++                int ticksFrozen = this.getTicksFrozen();
++                if (ticksFrozen != 0) {
++                    this.setTicksFrozen(Math.max(0, ticksFrozen - 2));
++                }
++                // Leaf port end
+             }
+ 
+             this.removeFrost();

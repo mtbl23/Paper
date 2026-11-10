@@ -1,0 +1,165 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mtbl23 <mtbl23@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 16:20:08 -0500
+Subject: [PATCH] Leaf port: walk brain behaviours as flat arrays
+
+Brain#startEachNonRunningBehavior and #tickEachRunningBehavior (and
+getRunningBehaviors) iterated the TreeMap of HashMaps of LinkedHashSets of
+behaviours on every tick of every brain (villagers, nautilus, ...): that was
+about a fifth of Brain.tick in the 12 bot Blitz profile. The behaviours are now
+flattened once into (activity, behaviour[]) groups in the exact iteration order
+of the old maps and rebuilt whenever behaviours are added or removed. Running
+behaviours are still snapshotted before they are ticked, but nothing is
+allocated when none runs. The memory slot map is an identity keyed
+Reference2ReferenceOpenHashMap (MemoryModuleType has identity semantics) instead
+of a HashMap.
+
+Behaviour: identical start/tick order and snapshot semantics; only the
+iteration order of the memory map changes, which is only visible in the order
+memories are written to NBT.
+
+Adapted from Leaf "Replace brain with optimized collection" (HaHaWTH, Taiyou06
+<kaandindar21@gmail.com>, hayanesuru <hayanesuru@outlook.jp>). Leaf also uses
+array maps/bit sets keyed by activity id, which changes the behaviour order,
+so that part is not ported.
+Leaf: https://github.com/Winds-Studio/Leaf
+
+diff --git a/net/minecraft/world/entity/ai/Brain.java b/net/minecraft/world/entity/ai/Brain.java
+index 2b22bbfac4e324969e7cff368c690ee915d33a66..946ef5b3a72d58a7f9f2cf992436b3611f71be39 100644
+--- a/net/minecraft/world/entity/ai/Brain.java
++++ b/net/minecraft/world/entity/ai/Brain.java
+@@ -37,7 +37,7 @@ import org.jspecify.annotations.Nullable;
+ 
+ public class Brain<E extends LivingEntity> {
+     private static final int SCHEDULE_UPDATE_DELAY = 20;
+-    private final Map<MemoryModuleType<?>, MemorySlot<?>> memories = Maps.newHashMap();
++    private final Map<MemoryModuleType<?>, MemorySlot<?>> memories = new it.unimi.dsi.fastutil.objects.Reference2ReferenceOpenHashMap<>(); // Leaf port - identity keyed open hash map (Leaf "Replace brain with optimized collection")
+     private final Map<SensorType<? extends Sensor<? super E>>, Sensor<? super E>> sensors = Maps.newLinkedHashMap();
+     private final Map<Integer, Map<Activity, Set<BehaviorControl<? super E>>>> availableBehaviorsByPriority = Maps.newTreeMap();
+     private @Nullable EnvironmentAttribute<Activity> schedule;
+@@ -45,6 +45,7 @@ public class Brain<E extends LivingEntity> {
+     private final Map<Activity, Set<MemoryModuleType<?>>> activityMemoriesToEraseWhenStopped = Maps.newHashMap();
+     private Set<Activity> coreActivities = Sets.newHashSet();
+     private final Set<Activity> activeActivities = Sets.newHashSet();
++    private @Nullable BehaviorGroup<E>[] behaviorGroups; // Leaf port - flattened snapshot of availableBehaviorsByPriority, null when it needs to be rebuilt
+     private Activity defaultActivity = Activity.IDLE;
+     private long lastScheduleUpdate = -9999L;
+ 
+@@ -268,19 +269,43 @@ public class Brain<E extends LivingEntity> {
+     public List<BehaviorControl<? super E>> getRunningBehaviors() {
+         List<BehaviorControl<? super E>> runningBehaviours = new ObjectArrayList<>();
+ 
+-        for (Map<Activity, Set<BehaviorControl<? super E>>> behavioursByActivities : this.availableBehaviorsByPriority.values()) {
+-            for (Set<BehaviorControl<? super E>> behaviors : behavioursByActivities.values()) {
+-                for (BehaviorControl<? super E> behavior : behaviors) {
+-                    if (behavior.getStatus() == Behavior.Status.RUNNING) {
+-                        runningBehaviours.add(behavior);
+-                    }
++        // Leaf port start - same iteration order as before, over the flattened groups
++        for (BehaviorGroup<E> group : this.behaviorGroups()) {
++            for (BehaviorControl<? super E> behavior : group.behaviors) {
++                if (behavior.getStatus() == Behavior.Status.RUNNING) {
++                    runningBehaviours.add(behavior);
+                 }
+             }
+         }
++        // Leaf port end
+ 
+         return runningBehaviours;
+     }
+ 
++    // Leaf port start - Adapted from Leaf "Replace brain with optimized collection" (HaHaWTH, Taiyou06, hayanesuru): the behaviours are
++    // walked as plain arrays instead of through the nested TreeMap/HashMap/LinkedHashSet iterators on every tick. The order is the
++    // iteration order of the original maps (priority ascending, then the activity map order, then insertion order), so behaviour is unchanged.
++    private BehaviorGroup<E>[] behaviorGroups() {
++        BehaviorGroup<E>[] groups = this.behaviorGroups;
++        if (groups == null) {
++            ObjectArrayList<BehaviorGroup<E>> list = new ObjectArrayList<>();
++            for (Map<Activity, Set<BehaviorControl<? super E>>> behavioursByActivities : this.availableBehaviorsByPriority.values()) {
++                for (Entry<Activity, Set<BehaviorControl<? super E>>> behavioursForActivity : behavioursByActivities.entrySet()) {
++                    list.add(new BehaviorGroup<>(behavioursForActivity.getKey(), behavioursForActivity.getValue().toArray(new BehaviorControl[0])));
++                }
++            }
++
++            groups = list.toArray(new BehaviorGroup[0]);
++            this.behaviorGroups = groups;
++        }
++
++        return groups;
++    }
++
++    private record BehaviorGroup<E extends LivingEntity>(Activity activity, BehaviorControl<? super E>[] behaviors) {
++    }
++    // Leaf port end
++
+     public void useDefaultActivity() {
+         this.setActiveActivity(this.defaultActivity);
+     }
+@@ -371,11 +396,14 @@ public class Brain<E extends LivingEntity> {
+                 .computeIfAbsent(activity, key -> Sets.newLinkedHashSet())
+                 .add(behavior);
+         }
++
++        this.behaviorGroups = null; // Leaf port - rebuild the flattened behaviours
+     }
+ 
+     @VisibleForTesting
+     public void removeAllBehaviors() {
+         this.availableBehaviorsByPriority.clear();
++        this.behaviorGroups = null; // Leaf port
+     }
+ 
+     public boolean isActive(final Activity activity) {
+@@ -410,26 +438,42 @@ public class Brain<E extends LivingEntity> {
+     private void startEachNonRunningBehavior(final ServerLevel level, final E body) {
+         long time = level.getGameTime();
+ 
+-        for (Map<Activity, Set<BehaviorControl<? super E>>> behavioursByActivities : this.availableBehaviorsByPriority.values()) {
+-            for (Entry<Activity, Set<BehaviorControl<? super E>>> behavioursForActivity : behavioursByActivities.entrySet()) {
+-                Activity activity = behavioursForActivity.getKey();
+-                if (this.activeActivities.contains(activity)) {
+-                    for (BehaviorControl<? super E> behavior : behavioursForActivity.getValue()) {
+-                        if (behavior.getStatus() == Behavior.Status.STOPPED) {
+-                            behavior.tryStart(level, body, time);
+-                        }
++        // Leaf port start - flattened walk, see behaviorGroups
++        for (BehaviorGroup<E> group : this.behaviorGroups()) {
++            if (this.activeActivities.contains(group.activity)) {
++                for (BehaviorControl<? super E> behavior : group.behaviors) {
++                    if (behavior.getStatus() == Behavior.Status.STOPPED) {
++                        behavior.tryStart(level, body, time);
+                     }
+                 }
+             }
+         }
++        // Leaf port end
+     }
+ 
+     private void tickEachRunningBehavior(final ServerLevel level, final E body) {
+         long timestamp = level.getGameTime();
+ 
+-        for (BehaviorControl<? super E> behavior : this.getRunningBehaviors()) {
+-            behavior.tickOrStop(level, body, timestamp);
++        // Leaf port start - snapshot the running behaviours like getRunningBehaviors did, but allocate nothing when none is running
++        List<BehaviorControl<? super E>> running = null;
++        for (BehaviorGroup<E> group : this.behaviorGroups()) {
++            for (BehaviorControl<? super E> behavior : group.behaviors) {
++                if (behavior.getStatus() == Behavior.Status.RUNNING) {
++                    if (running == null) {
++                        running = new ObjectArrayList<>();
++                    }
++
++                    running.add(behavior);
++                }
++            }
++        }
++
++        if (running != null) {
++            for (BehaviorControl<? super E> behavior : running) {
++                behavior.tickOrStop(level, body, timestamp);
++            }
+         }
++        // Leaf port end
+     }
+ 
+     private boolean activityRequirementsAreMet(final Activity activity) {

@@ -202,14 +202,33 @@ public class WorldConfiguration extends ConfigurationPart {
                 map.put(EntityTypes.LLAMA_SPIT, IntOr.Disabled.DISABLED);
             });
 
+            // Leaf port start - array copy of despawnRanges indexed by category ordinal for the per mob per tick despawn check (a HashMap with enum keys hashes by identity)
+            private transient DespawnRangePair[] despawnRangesByOrdinal = new DespawnRangePair[0];
+
+            public DespawnRangePair despawnRange(final MobCategory category) {
+                final DespawnRangePair[] byOrdinal = this.despawnRangesByOrdinal;
+                final int ordinal = category.ordinal();
+                if (ordinal < byOrdinal.length) {
+                    final DespawnRangePair range = byOrdinal[ordinal];
+                    if (range != null) {
+                        return range;
+                    }
+                }
+                return this.despawnRanges.get(category);
+            }
+            // Leaf port end
+
             @PostProcess
             public void precomputeDespawnDistances() throws SerializationException {
+                final DespawnRangePair[] byOrdinal = new DespawnRangePair[MobCategory.values().length]; // Leaf port
                 for (final Map.Entry<MobCategory, DespawnRangePair> entry : this.despawnRanges.entrySet()) {
                     final MobCategory category = entry.getKey();
                     final DespawnRangePair range = entry.getValue();
                     range.hard().preComputed(category.getDespawnDistance(), category.getSerializedName());
                     range.soft().preComputed(category.getNoDespawnDistance(), category.getSerializedName());
+                    byOrdinal[category.ordinal()] = range; // Leaf port
                 }
+                this.despawnRangesByOrdinal = byOrdinal; // Leaf port
             }
 
             public WaterAnimalSpawnHeight wateranimalSpawnHeight;
