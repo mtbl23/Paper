@@ -1,0 +1,141 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mtbl23 <182822903+mtbl23@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 17:17:05 -0500
+Subject: [PATCH] Keep Paper's pull semantics in the hopper extract fast path
+
+A skipped identical attempt repeats the side effects of the failed one (source marked changed per takeable item that could
+not be moved, cooldown when full); a real attempt is Paper's own pull. Found with the differential hopper test (comparator
+output next to a hopper that is pulled from).
+
+diff --git a/net/minecraft/world/level/block/entity/HopperBlockEntity.java b/net/minecraft/world/level/block/entity/HopperBlockEntity.java
+index 277838c0bbcf567d4bacb9d09c8043789bc936d4..1faa09f67fc638e02a2ade7e415fc880b69876ef 100644
+--- a/net/minecraft/world/level/block/entity/HopperBlockEntity.java
++++ b/net/minecraft/world/level/block/entity/HopperBlockEntity.java
+@@ -313,11 +313,10 @@ public class HopperBlockEntity extends RandomizableContainerBlockEntity implemen
+         }
+         origItemStack.setCount(originalItemCount);
+ 
+-        Container updatedContainer = container;
+-        if (container instanceof net.minecraft.world.CompoundContainer compoundContainer) {
+-            updatedContainer = i >= compoundContainer.container1.getContainerSize() ? compoundContainer.container2 : compoundContainer.container1;
++        if (pullFailedCount < pullFailedSlots.length) { // Leaves - Lithium Sleeping Block Entity - remembered so a skipped identical attempt can repeat the side effects
++            pullFailedSlots[pullFailedCount++] = i;
+         }
+-        updatedContainer.setChanged();
++        failedPullUpdate(container, i);
+ 
+         if (level.paperConfig().hopper.cooldownWhenFull) {
+             applyCooldown(hopper);
+@@ -326,6 +325,20 @@ public class HopperBlockEntity extends RandomizableContainerBlockEntity implemen
+         return false;
+     }
+ 
++    // Leaves start - Lithium Sleeping Block Entity
++    private static final int[] pullFailedSlots = new int[64];
++    private static int pullFailedCount;
++
++    /** The side effect of a failed pull: the source inventory is marked changed (comparator updates). */
++    private static void failedPullUpdate(final Container container, final int slot) {
++        Container updatedContainer = container;
++        if (container instanceof net.minecraft.world.CompoundContainer compoundContainer) {
++            updatedContainer = slot >= compoundContainer.container1.getContainerSize() ? compoundContainer.container2 : compoundContainer.container1;
++        }
++        updatedContainer.setChanged();
++    }
++    // Leaves end - Lithium Sleeping Block Entity
++
+     @Nullable
+     private static ItemStack callPushMoveEvent(Container destination, ItemStack itemStack, HopperBlockEntity hopper) {
+         final org.bukkit.inventory.Inventory destinationInventory = getInventory(destination);
+@@ -866,7 +879,9 @@ public class HopperBlockEntity extends RandomizableContainerBlockEntity implemen
+     @org.jetbrains.annotations.Nullable private TickingBlockEntity sleepingTicker = null;
+     private long myModCountAtLastInsert, myModCountAtLastExtract, myModCountAtLastItemCollect;
+     // Paper's cooldown-when-full behaviour for a failed transfer; remembered so that an attempt skipped because nothing changed applies it too
+-    private boolean insertFailureAppliesCooldown, extractFailureAppliesCooldown;
++    private boolean insertFailureAppliesCooldown;
++    private static final int[] NO_SLOTS = new int[0];
++    private int[] extractFailedSlots = NO_SLOTS;
+     private boolean skipNextSleepCheckAfterCooldown = false;
+ 
+     private net.caffeinemc.mods.lithium.common.hopper.HopperCachingState.BlockInventory insertionMode = net.caffeinemc.mods.lithium.common.hopper.HopperCachingState.BlockInventory.UNKNOWN;
+@@ -1586,63 +1601,30 @@ public class HopperBlockEntity extends RandomizableContainerBlockEntity implemen
+         net.caffeinemc.mods.lithium.common.hopper.LithiumStackList hopperStackList = net.caffeinemc.mods.lithium.common.hopper.InventoryHelper.getLithiumStackList(hopperBlockEntity);
+         net.caffeinemc.mods.lithium.common.hopper.LithiumStackList fromStackList = hopperBlockEntity.extractStackList;
+ 
+-        if (hopperStackList.getModCount() == hopperBlockEntity.myModCountAtLastExtract) {
+-            if (fromStackList.getModCount() == hopperBlockEntity.extractStackListModCount) {
+-                if (!(from instanceof net.caffeinemc.mods.lithium.common.block.entity.inventory_comparator_tracking.ComparatorTracker comparatorTracker) || comparatorTracker.lithium$hasAnyComparatorNearby()) {
+-                    //noinspection CollectionAddedToSelf
+-                    fromStackList.runComparatorUpdatePatternOnFailedExtract(fromStackList, from);
+-                }
+-                if (hopperBlockEntity.extractFailureAppliesCooldown) { // Paper - the failed attempt that was skipped would have set the cooldown
+-                    hopperBlockEntity.setCooldown(world.spigotConfig.hopperTransfer);
++        if (hopperStackList.getModCount() == hopperBlockEntity.myModCountAtLastExtract
++            && fromStackList.getModCount() == hopperBlockEntity.extractStackListModCount) {
++            // Nothing changed since the last attempt, which failed: repeat what that failure did (Paper marks the source
++            // changed and applies the cooldown for every takeable item that could not be moved).
++            final int[] failedSlots = hopperBlockEntity.extractFailedSlots;
++            for (final int slot : failedSlots) {
++                failedPullUpdate(from, slot);
++                if (world.paperConfig().hopper.cooldownWhenFull) {
++                    applyCooldown(hopperBlockEntity);
+                 }
+-                return false;
+             }
++            return false;
+         }
+ 
+-        int[] availableSlots = from instanceof WorldlyContainer ? ((WorldlyContainer) from).getSlotsForFace(Direction.DOWN) : null;
+-        int fromSize = availableSlots != null ? availableSlots.length : from.getContainerSize();
+-        boolean failedToMoveATakeableItem = false;
+-        for (int i = 0; i < fromSize; i++) {
+-            int fromSlot = availableSlots != null ? availableSlots[i] : i;
+-            ItemStack itemStack = fromStackList.get(fromSlot);
+-            if (!itemStack.isEmpty() && canTakeItemFromContainer(to, from, itemStack, fromSlot, Direction.DOWN)) {
+-                if (!skipPullModeEventFire) {
+-                    itemStack = callPullMoveEvent(to, from, itemStack);
+-                    if (itemStack == null) { // cancelled
+-                        return true;
+-                    }
+-                }
+-                //calling removeStack is necessary due to its side effects (markDirty in LootableContainerBlockEntity)
+-                ItemStack takenItem = from.removeItem(fromSlot, 1);
+-                assert !takenItem.isEmpty();
+-                boolean transferSuccess = net.caffeinemc.mods.lithium.common.hopper.HopperHelper.tryMoveSingleItem(to, takenItem, null);
+-                if (transferSuccess) {
+-                    to.setChanged();
+-                    from.setChanged();
+-                    return true;
+-                }
+-                //put the item back similar to vanilla
+-                ItemStack restoredStack = fromStackList.get(fromSlot);
+-                if (restoredStack.isEmpty()) {
+-                    restoredStack = takenItem;
+-                } else {
+-                    restoredStack.grow(1);
+-                }
+-                //calling setStack is necessary due to its side effects (markDirty in LootableContainerBlockEntity)
+-                from.setItem(fromSlot, restoredStack);
+-                failedToMoveATakeableItem = true;
++        // Attempt exactly as Paper does, remembering which slots failed
++        pullFailedCount = 0;
++        for (final int slot : getSlots(from, Direction.DOWN)) {
++            if (tryTakeInItemFromSlot(hopperBlockEntity, from, slot, Direction.DOWN, world)) {
++                return true;
+             }
+         }
+-        // Paper - hopperPull applies the cooldown for every takeable item that could not be moved
+-        final boolean applyCooldown = failedToMoveATakeableItem && world.paperConfig().hopper.cooldownWhenFull;
+-        hopperBlockEntity.extractFailureAppliesCooldown = applyCooldown;
+-        if (applyCooldown) {
+-            hopperBlockEntity.setCooldown(world.spigotConfig.hopperTransfer);
+-        }
++        hopperBlockEntity.extractFailedSlots = pullFailedCount == 0 ? NO_SLOTS : java.util.Arrays.copyOf(pullFailedSlots, pullFailedCount);
+         hopperBlockEntity.myModCountAtLastExtract = hopperStackList.getModCount();
+-        if (fromStackList != null) {
+-            hopperBlockEntity.extractStackListModCount = fromStackList.getModCount();
+-        }
++        hopperBlockEntity.extractStackListModCount = fromStackList.getModCount();
+         return false;
+     }
+     // Leaves end - Lithium Sleeping Block Entity
