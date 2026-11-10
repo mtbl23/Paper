@@ -1,0 +1,85 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mtbl23 <mtbl23@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 16:37:14 -0500
+Subject: [PATCH] Leaf port: fewer biome and structure lookups per spawn
+ attempt
+
+NaturalSpawner#getRandomSpawnMobAt looked the biome up for every spawn attempt
+of every category, but only water ambient mobs use it (the biome lookup is a
+BiomeManager call with the fiddle) - it was the single biggest part of
+spawnCategoryForPosition in the 12 bot profile. The biome is now only read for
+water ambient. Also, when no plugin listens to PreCreatureSpawnEvent, the spawn
+data that was just drawn at this position is not looked up again in
+canSpawnMobAt (a second structure and attribute lookup that always succeeds).
+
+Behaviour: identical results and identical random number use (getBiome has no
+side effects; the recheck only exists for event listeners).
+
+Ported from Leaf "optimize mob spawning" (hayanesuru <hayanesuru@outlook.jp>): "Only query
+biomes for reduced water ambient spawns when needed" and "Avoid repeated spawn list
+lookups for newly selected mobs if no PreCreatureSpawnEvent listeners". Only these two
+parts are ported; the rest of that patch (K-D tree player lookup, collecting spawning
+chunks differently, reduced random calls) changes spawn behaviour or random sequences.
+Leaf: https://github.com/Winds-Studio/Leaf
+
+diff --git a/net/minecraft/world/level/NaturalSpawner.java b/net/minecraft/world/level/NaturalSpawner.java
+index 411db7f3cdecb6d12bc4cc70b2dd71da728d9121..c5c2fffa1ea45d25a77fab8c86b88015c7b8d753 100644
+--- a/net/minecraft/world/level/NaturalSpawner.java
++++ b/net/minecraft/world/level/NaturalSpawner.java
+@@ -303,7 +303,8 @@ public final class NaturalSpawner {
+                     if (nearestPlayer != null) {
+                         double nearestPlayerDistanceSqr = nearestPlayer.distanceToSqr(xx, yStart, zz);
+                         if (level.isLoadedAndInBounds(pos) && isRightDistanceToPlayerAndSpawnPoint(level, chunk, pos, nearestPlayerDistanceSqr)) { // Paper - don't load chunks for mob spawn
+-                            if (currentSpawnData == null) {
++                            final boolean spawnDataSelectedHere = currentSpawnData == null; // Leaf port
++                            if (spawnDataSelectedHere) {
+                                 Optional<MobSpawnSettings.SpawnerData> nextSpawnData = getRandomSpawnMobAt(
+                                     level, structureManager, generator, mobCategory, level.random, pos
+                                 );
+@@ -316,7 +317,7 @@ public final class NaturalSpawner {
+                             }
+ 
+                             // Paper start - PreCreatureSpawnEvent
+-                            PreSpawnStatus doSpawning = isValidSpawnPostitionForType(level, mobCategory, structureManager, generator, currentSpawnData, pos, nearestPlayerDistanceSqr);
++                            PreSpawnStatus doSpawning = isValidSpawnPostitionForType(level, mobCategory, structureManager, generator, currentSpawnData, pos, nearestPlayerDistanceSqr, spawnDataSelectedHere);
+                             // Paper start - per player mob count backoff
+                             if (doSpawning == PreSpawnStatus.ABORT || doSpawning == PreSpawnStatus.CANCELLED) {
+                                 level.getChunkSource().chunkMap.updateFailurePlayerMobTypeMap(pos.getX() >> 4, pos.getZ() >> 4, mobCategory);
+@@ -400,12 +401,14 @@ public final class NaturalSpawner {
+         final ChunkGenerator generator,
+         final MobSpawnSettings.SpawnerData currentSpawnData,
+         final BlockPos.MutableBlockPos pos,
+-        final double nearestPlayerDistanceSqr
++        final double nearestPlayerDistanceSqr,
++        final boolean spawnDataSelectedHere // Leaf port
+     ) {
+         // Paper start - PreCreatureSpawnEvent
+         EntityType<?> type = currentSpawnData.type();
++        final boolean hasPreSpawnEventListeners = com.destroystokyo.paper.event.entity.PreCreatureSpawnEvent.getHandlerList().getRegisteredListeners().length != 0; // Leaf port
+         // Leaf port start - skip building the event (Bukkit location and entity type conversion) when nobody listens (Leaf "Skip PreCreatureSpawnEvent if no listeners", Taiyou06)
+-        if (com.destroystokyo.paper.event.entity.PreCreatureSpawnEvent.getHandlerList().getRegisteredListeners().length != 0) {
++        if (hasPreSpawnEventListeners) {
+         com.destroystokyo.paper.event.entity.PreCreatureSpawnEvent event = new com.destroystokyo.paper.event.entity.PreCreatureSpawnEvent(
+                 org.bukkit.craftbukkit.util.CraftLocation.toBukkit(pos, level),
+                 org.bukkit.craftbukkit.entity.CraftEntityType.minecraftToBukkit(type), org.bukkit.event.entity.CreatureSpawnEvent.SpawnReason.NATURAL
+@@ -422,7 +425,8 @@ public final class NaturalSpawner {
+         // Paper end - PreCreatureSpawnEvent
+             && (type.canSpawnFarFromPlayer() || !(nearestPlayerDistanceSqr > type.getCategory().getDespawnDistance() * type.getCategory().getDespawnDistance()))
+             && type.canSummon()
+-            && canSpawnMobAt(level, structureManager, generator, mobCategory, currentSpawnData, pos)
++            // Leaf port - the spawn data was just drawn from the very list canSpawnMobAt would look it up in, at the same position, with no event in between
++            && ((spawnDataSelectedHere && !hasPreSpawnEventListeners) || canSpawnMobAt(level, structureManager, generator, mobCategory, currentSpawnData, pos))
+             && SpawnPlacements.isSpawnPositionOk(type, level, pos)
+             && SpawnPlacements.checkSpawnRules(type, level, EntitySpawnReason.NATURAL, pos, level.random)
+             && level.noCollision(type.getSpawnAABB(pos.getX() + 0.5, pos.getY(), pos.getZ() + 0.5));
+@@ -461,8 +465,8 @@ public final class NaturalSpawner {
+         final RandomSource random,
+         final BlockPos pos
+     ) {
+-        Holder<Biome> biome = level.getBiome(pos);
+-        return mobCategory == MobCategory.WATER_AMBIENT && biome.is(BiomeTags.REDUCED_WATER_AMBIENT_SPAWNS) && random.nextFloat() < 0.98F
++        // Leaf port - only water ambient mobs need the biome (Leaf "optimize mob spawning": only query biomes for reduced water ambient spawns when needed); getBiome has no side effects
++        return mobCategory == MobCategory.WATER_AMBIENT && level.getBiome(pos).is(BiomeTags.REDUCED_WATER_AMBIENT_SPAWNS) && random.nextFloat() < 0.98F
+             ? Optional.empty()
+             : mobsAt(level, structureManager, generator, mobCategory, pos).getRandom(random);
+     }
