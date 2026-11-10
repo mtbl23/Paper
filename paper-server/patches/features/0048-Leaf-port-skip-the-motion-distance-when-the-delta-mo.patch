@@ -1,0 +1,31 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mtbl23 <mtbl23@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 16:31:55 -0500
+Subject: [PATCH] Leaf port: skip the motion distance when the delta movement
+ instance is unchanged
+
+ServerEntity#sendChanges compared the delta movement with the last sent one on
+every sync tick. The game reuses the same Vec3 when nothing moved, and the
+distance of an instance to itself is 0, which never triggers a packet, so the
+distance is not computed in that case.
+
+Behaviour: identical.
+
+Ported from Leaf/SparklyPaper "Skip distanceToSqr call in ServerEntity#sendChanges
+if the delta movement hasn't changed" by MrPowerGamerBR <git@mrpowergamerbr.com>.
+Leaf: https://github.com/Winds-Studio/Leaf
+
+diff --git a/net/minecraft/server/level/ServerEntity.java b/net/minecraft/server/level/ServerEntity.java
+index e46f95b19da1c14f240ec6697f22b5e220e0a835..a08968dc0f1bf501de8f80b0d6a3c6f270461e91 100644
+--- a/net/minecraft/server/level/ServerEntity.java
++++ b/net/minecraft/server/level/ServerEntity.java
+@@ -192,7 +192,8 @@ public class ServerEntity {
+ 
+                 if (this.entity.needsSync || this.trackDelta || this.entity instanceof LivingEntity livingEntity && livingEntity.isFallFlying()) {
+                     Vec3 movement = this.entity.getDeltaMovement();
+-                    double diff = movement.distanceToSqr(this.lastSentMovement);
++                    // Leaf port - the very same Vec3 instance has a distance of 0 and never changes anything (Leaf/SparklyPaper "Skip distanceToSqr call in ServerEntity#sendChanges", MrPowerGamerBR)
++                    double diff = movement == this.lastSentMovement ? 0.0 : movement.distanceToSqr(this.lastSentMovement);
+                     if (diff > 1.0E-7 || diff > 0.0 && movement.lengthSqr() == 0.0) {
+                         this.lastSentMovement = movement;
+                         if (this.entity instanceof AbstractHurtingProjectile projectile) {

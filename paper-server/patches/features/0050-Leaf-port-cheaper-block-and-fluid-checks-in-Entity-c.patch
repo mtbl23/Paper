@@ -1,0 +1,91 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mtbl23 <mtbl23@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 16:34:14 -0500
+Subject: [PATCH] Leaf port: cheaper block and fluid checks in
+ Entity#checkInsideBlocks
+
+Every entity runs this each tick for the blocks it moved through.
+- The block state at each visited position went through Level#getBlockState,
+  a global chunk lookup per block. The chunk is now looked up once and reused
+  while the visited blocks stay in it; tree capture, out of bounds positions and
+  chunks that are not loaded take the old path.
+- collidedWithFluid was evaluated for every non-air block even when its fluid
+  state is empty. Fluid#getAABB returns null for an empty fluid, so the check
+  is skipped for those.
+
+Behaviour: identical results.
+
+Ported from Leaf "optimize checkInsideBlocks calls" by Taiyou06 <kaandindar21@gmail.com>
+(License: LGPL-3.0-only).
+Leaf: https://github.com/Winds-Studio/Leaf
+
+diff --git a/net/minecraft/world/entity/Entity.java b/net/minecraft/world/entity/Entity.java
+index bea975af0b8be42883bac92d0366cf93ebadc0fc..92057a153dc1355f203613c78bcf87144e0045d9 100644
+--- a/net/minecraft/world/entity/Entity.java
++++ b/net/minecraft/world/entity/Entity.java
+@@ -1880,6 +1880,10 @@ public abstract class Entity
+         boolean debugEntityBlockIntersections = this.level instanceof ServerLevel serverLevel
+             && serverLevel.getServer().debugSubscribers().hasAnySubscriberFor(DebugSubscriptions.ENTITY_BLOCK_INTERSECTIONS);
+         AtomicInteger iterations = new AtomicInteger();
++        // Leaf port start - the visited blocks are usually in one or two chunks: look the chunk up once and reuse it (see getInsideBlockState)
++        final net.minecraft.world.level.chunk.LevelChunk[] cachedChunk = {null};
++        final long[] cachedChunkKey = {Long.MIN_VALUE};
++        // Leaf port end
+         BlockGetter.forEachBlockIntersectedBetween(
+             from,
+             to,
+@@ -1894,7 +1898,7 @@ public abstract class Entity
+                 }
+ 
+                 iterations.set(iteration);
+-                BlockState state = this.level().getBlockState(blockIntersection);
++                BlockState state = this.getInsideBlockState(blockIntersection, cachedChunk, cachedChunkKey); // Leaf port
+                 if (state.isAir()) {
+                     if (debugEntityBlockIntersections) {
+                         this.debugBlockIntersection((ServerLevel)this.level(), blockIntersection.immutable(), false, false);
+@@ -1905,7 +1909,10 @@ public abstract class Entity
+                     VoxelShape intersectShape = state.getEntityInsideCollisionShape(this.level(), blockIntersection, this);
+                     boolean insideBlock = intersectShape == Shapes.block()
+                         || this.collidedWithShapeMovingFrom(from, to, intersectShape.move(new Vec3(blockIntersection)).toAabbs());
+-                    boolean insideFluid = this.collidedWithFluid(state.getFluidState(), blockIntersection, from, to);
++                    // Leaf port start - an empty fluid has no AABB (Fluid#getAABB), so collidedWithFluid is false without building anything (Leaf "optimize checkInsideBlocks calls", Taiyou06; LGPL-3.0-only)
++                    final FluidState insideFluidState = state.getFluidState();
++                    boolean insideFluid = !insideFluidState.isEmpty() && this.collidedWithFluid(insideFluidState, blockIntersection, from, to);
++                    // Leaf port end
+                     if ((insideBlock || insideFluid) && visitedBlocks.add(blockIntersection.asLong())) {
+                         if (insideBlock) {
+                             try {
+@@ -1955,6 +1962,33 @@ public abstract class Entity
+         level.debugSynchronizers().sendBlockValue(pos, DebugSubscriptions.ENTITY_BLOCK_INTERSECTIONS, type);
+     }
+ 
++    // Leaf port start - same result as level().getBlockState(pos): a loaded chunk is read directly, everything else (tree capture, out of bounds, not loaded) takes the vanilla path
++    private BlockState getInsideBlockState(
++        final BlockPos pos, final net.minecraft.world.level.chunk.LevelChunk[] cachedChunk, final long[] cachedChunkKey
++    ) {
++        final Level level = this.level();
++        if (level.captureTreeGeneration || !(level instanceof ServerLevel serverLevel) || !level.isInValidBounds(pos)) {
++            return level.getBlockState(pos);
++        }
++
++        final int chunkX = pos.getX() >> 4;
++        final int chunkZ = pos.getZ() >> 4;
++        final long key = ChunkPos.pack(chunkX, chunkZ);
++        net.minecraft.world.level.chunk.LevelChunk chunk = cachedChunk[0];
++        if (chunk == null || cachedChunkKey[0] != key) {
++            chunk = serverLevel.getChunkSource().getChunkAtIfLoadedImmediately(chunkX, chunkZ);
++            if (chunk == null) {
++                return level.getBlockState(pos);
++            }
++
++            cachedChunk[0] = chunk;
++            cachedChunkKey[0] = key;
++        }
++
++        return chunk.getBlockState(pos);
++    }
++    // Leaf port end
++
+     public boolean collidedWithFluid(final FluidState fluidState, final BlockPos blockPos, final Vec3 from, final Vec3 to) {
+         AABB fluidAABB = fluidState.getAABB(this.level(), blockPos);
+         return fluidAABB != null && this.collidedWithShapeMovingFrom(from, to, List.of(fluidAABB));
