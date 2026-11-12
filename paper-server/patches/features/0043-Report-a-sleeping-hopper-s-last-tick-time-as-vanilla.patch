@@ -1,0 +1,80 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mtbl23 <182822903+mtbl23@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 13:13:06 -0500
+Subject: [PATCH] Report a sleeping hopper's last tick time as vanilla would
+ before the block entity phase
+
+A sleeping hopper stands in for one that already ticked this game tick. Before the block entity phase starts (an item entity
+falling into a hopper during entity ticking passes items on) vanilla's value is still the previous tick, so a receiving hopper
+got cooldown 7 and skipped its tick instead of 7 and then ticking down to 6. Found with the differential test (seed 61).
+
+diff --git a/net/minecraft/world/level/Level.java b/net/minecraft/world/level/Level.java
+index d693c057340c2cc8f09303e40855d11050ec42a0..daf750ab30097a8f236c9b1c98c25f2572eaf0dd 100644
+--- a/net/minecraft/world/level/Level.java
++++ b/net/minecraft/world/level/Level.java
+@@ -121,6 +121,7 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+     protected final CollectingNeighborUpdater neighborUpdater;
+     private final List<TickingBlockEntity> pendingBlockEntityTickers = Lists.newArrayList();
+     private boolean tickingBlockEntities;
++    public long blockEntityTickStartedAt = Long.MIN_VALUE; // Lithium - game time of the last block entity tick phase that started
+     protected final Thread thread;
+     private final boolean isDebug;
+     private int skyDarken;
+@@ -1487,6 +1488,7 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+ 
+     public void tickBlockEntities() {
+         this.tickingBlockEntities = true;
++        this.blockEntityTickStartedAt = this.getGameTime(); // Lithium
+         if (!this.pendingBlockEntityTickers.isEmpty()) {
+             this.blockEntityTickers.addAll(this.pendingBlockEntityTickers);
+             this.pendingBlockEntityTickers.clear();
+diff --git a/net/minecraft/world/level/block/entity/HopperBlockEntity.java b/net/minecraft/world/level/block/entity/HopperBlockEntity.java
+index cfd03c13aef01a411713d8c63395e0071e400306..b21cfcaa064740bc093bd643aff6f430123cad86 100644
+--- a/net/minecraft/world/level/block/entity/HopperBlockEntity.java
++++ b/net/minecraft/world/level/block/entity/HopperBlockEntity.java
+@@ -669,7 +669,7 @@ public class HopperBlockEntity extends RandomizableContainerBlockEntity implemen
+             if (success) {
+                 if (wasEmpty && container instanceof HopperBlockEntity hopperBlockEntity && !hopperBlockEntity.isOnCustomCooldown()) {
+                     int skipTickCount = 0;
+-                    if (from instanceof HopperBlockEntity fromHopper && hopperBlockEntity.tickedGameTime >= fromHopper.tickedGameTime) {
++                    if (from instanceof HopperBlockEntity fromHopper && hopperBlockEntity.effectiveTickedGameTime() >= fromHopper.effectiveTickedGameTime()) {
+                         skipTickCount = 1;
+                     }
+ 
+@@ -814,7 +814,7 @@ public class HopperBlockEntity extends RandomizableContainerBlockEntity implemen
+         // Leaves start - Lithium Sleeping Block Entity
+         if (net.caffeinemc.mods.lithium.common.SleepingBlockEntityConfig.ENABLED) {
+             if (time == 7) {
+-                if (this.tickedGameTime == Long.MAX_VALUE) {
++                if (this.tickedGameTime == Long.MAX_VALUE && this.effectiveTickedGameTime() == Long.MAX_VALUE) {
+                     this.sleepOnlyCurrentTick();
+                 } else {
+                     this.wakeUpNow();
+@@ -827,6 +827,18 @@ public class HopperBlockEntity extends RandomizableContainerBlockEntity implemen
+         this.cooldownTime = time;
+     }
+ 
++    /**
++     * The game time at which this hopper last ticked, as vanilla would report it. A sleeping hopper stands in for one that already
++     * ticked this game tick (Long.MAX_VALUE), which is only right once the block entity phase of the tick has started: before that
++     * (entity ticking, scheduled ticks) vanilla's value is still the previous tick.
++     */
++    private long effectiveTickedGameTime() {
++        if (this.tickedGameTime == Long.MAX_VALUE && this.level != null && this.level.blockEntityTickStartedAt < this.level.getGameTime()) {
++            return this.level.getGameTime() - 1;
++        }
++        return this.tickedGameTime;
++    }
++
+     private boolean isOnCooldown() {
+         return this.cooldownTime > 0;
+     }
+@@ -1569,7 +1581,7 @@ public class HopperBlockEntity extends RandomizableContainerBlockEntity implemen
+                         if (insertInventoryWasEmptyHopperNotDisabled) {
+                             HopperBlockEntity receivingHopper = (HopperBlockEntity) insertInventory;
+                             int k = world.spigotConfig.hopperTransfer; // Spigot
+-                            if (receivingHopper.tickedGameTime >= hopperBlockEntity.tickedGameTime) {
++                            if (receivingHopper.effectiveTickedGameTime() >= hopperBlockEntity.effectiveTickedGameTime()) {
+                                 k--;
+                             }
+                             receivingHopper.setCooldown(k);
