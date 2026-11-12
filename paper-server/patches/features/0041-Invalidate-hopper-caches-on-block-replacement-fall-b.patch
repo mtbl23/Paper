@@ -1,0 +1,53 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mtbl23 <182822903+mtbl23@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 22:32:34 -0500
+Subject: [PATCH] Invalidate hopper caches on block replacement, fall back on
+ pickup listeners
+
+Hoppers cache what is above and in front of them. A block replaced without neighbour updates (plugins, commands) now
+tells adjacent hoppers, and an InventoryPickupItemEvent listener switches hoppers back to the Paper path (the event fires
+for every pickup attempt). Found with the differential hopper test.
+
+diff --git a/net/minecraft/world/level/block/entity/HopperBlockEntity.java b/net/minecraft/world/level/block/entity/HopperBlockEntity.java
+index 1faa09f67fc638e02a2ade7e415fc880b69876ef..277219bf18d654079ee86a76f60988af49cd8c59 100644
+--- a/net/minecraft/world/level/block/entity/HopperBlockEntity.java
++++ b/net/minecraft/world/level/block/entity/HopperBlockEntity.java
+@@ -871,10 +871,19 @@ public class HopperBlockEntity extends RandomizableContainerBlockEntity implemen
+             && level.spigotConfig.hopperAmount == 1
+             && level.spigotConfig.hopperTransfer == 8
+             && !level.paperConfig().hopper.ignoreOccludingBlocks
++            && org.bukkit.event.inventory.InventoryPickupItemEvent.getHandlerList().getRegisteredListeners().length == 0
+             && io.papermc.paper.event.inventory.PrepareHopperTransferEvent.getHandlerList().getRegisteredListeners().length == 0
+             && org.bukkit.event.inventory.HopperInventorySearchEvent.getHandlerList().getRegisteredListeners().length == 0;
+     }
+ 
++    public static void invalidateAdjacentHopperCaches(final Level level, final BlockPos pos) {
++        for (final Direction direction : Direction.values()) {
++            if (level.lithium$getLoadedExistingBlockEntity(pos.relative(direction)) instanceof HopperBlockEntity hopper) {
++                hopper.lithium$invalidateCacheOnNeighborUpdate(direction.getOpposite());
++            }
++        }
++    }
++
+     @org.jetbrains.annotations.Nullable private net.minecraft.world.level.chunk.LevelChunk.RebindableTickingBlockEntityWrapper tickWrapper = null;
+     @org.jetbrains.annotations.Nullable private TickingBlockEntity sleepingTicker = null;
+     private long myModCountAtLastInsert, myModCountAtLastExtract, myModCountAtLastItemCollect;
+diff --git a/net/minecraft/world/level/chunk/LevelChunk.java b/net/minecraft/world/level/chunk/LevelChunk.java
+index 989a5e5e0d5ff3f20c8c98e8d94611e14e5ff966..0709ba485bc5366685f20c6775adc4ab439bd85d 100644
+--- a/net/minecraft/world/level/chunk/LevelChunk.java
++++ b/net/minecraft/world/level/chunk/LevelChunk.java
+@@ -451,6 +451,14 @@ public class LevelChunk extends ChunkAccess implements DebugValueSource, ca.spot
+             }
+         }
+ 
++        // Lithium - hoppers cache what is above them and in front of them; that must not depend on neighbour updates being sent
++        // (plugins and commands place blocks without them), so tell adjacent hoppers whenever a block is replaced.
++        if (net.caffeinemc.mods.lithium.common.SleepingBlockEntityConfig.ENABLED
++            && this.level instanceof ServerLevel
++            && (blockChanged || newBlock instanceof net.minecraft.world.WorldlyContainerHolder)) {
++            net.minecraft.world.level.block.entity.HopperBlockEntity.invalidateAdjacentHopperCaches(this.level, pos);
++        }
++
+         this.markUnsaved();
+         return oldState;
+     }
