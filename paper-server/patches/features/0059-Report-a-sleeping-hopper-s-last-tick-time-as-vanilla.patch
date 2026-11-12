@@ -9,7 +9,7 @@ falling into a hopper during entity ticking passes items on) vanilla's value is 
 got cooldown 7 and skipped its tick instead of 7 and then ticking down to 6. Found with the differential test (seed 61).
 
 diff --git a/net/minecraft/world/level/Level.java b/net/minecraft/world/level/Level.java
-index d693c057340c2cc8f09303e40855d11050ec42a0..daf750ab30097a8f236c9b1c98c25f2572eaf0dd 100644
+index 2271a83364e8491508e055afd870cbb3389d74f7..74a37fdaeb86c191e1fed6d922c23fa1f77c5a2f 100644
 --- a/net/minecraft/world/level/Level.java
 +++ b/net/minecraft/world/level/Level.java
 @@ -121,6 +121,7 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
@@ -20,7 +20,7 @@ index d693c057340c2cc8f09303e40855d11050ec42a0..daf750ab30097a8f236c9b1c98c25f25
      protected final Thread thread;
      private final boolean isDebug;
      private int skyDarken;
-@@ -1487,6 +1488,7 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+@@ -1493,6 +1494,7 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
  
      public void tickBlockEntities() {
          this.tickingBlockEntities = true;
