@@ -202,10 +202,10 @@ index d8cacf975c2c35e5fe7370bd5b007fbe0d4bd031..831bc7eadb3c9b662c704ca183241912
          }
      }
 diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
-index ea4cc487002a0edc54cc49bfbecf72be156b6af7..04d859c240e123a12c34284ae06b2f4b6f7d5203 100644
+index 071230501800968cb8326dca78682406173aaadd..8215ce08fd63c3871e61d23238f8f7da5277f314 100644
 --- a/net/minecraft/server/level/ServerLevel.java
 +++ b/net/minecraft/server/level/ServerLevel.java
-@@ -2796,6 +2796,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -2804,6 +2804,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
  
          for (TickingBlockEntity ticker : this.blockEntityTickers) {
              BlockPos blockPos = ticker.getPos();
@@ -227,7 +227,7 @@ index 6e08d50794c4af4405f3e164a3fd46f376b3f78f..942c985ff067f163b4d4434625e71c90
  
      int getContainerSize();
 diff --git a/net/minecraft/world/entity/Entity.java b/net/minecraft/world/entity/Entity.java
-index bea975af0b8be42883bac92d0366cf93ebadc0fc..ba0e741825e61cdb62579b7756e6c759d1817496 100644
+index 92057a153dc1355f203613c78bcf87144e0045d9..8ef292ee310fdd244daf080c2548b676fe0bf160 100644
 --- a/net/minecraft/world/entity/Entity.java
 +++ b/net/minecraft/world/entity/Entity.java
 @@ -327,7 +327,7 @@ public abstract class Entity
@@ -499,10 +499,10 @@ index c223581e30414842ce24079b47c82639d36b7e73..99fd3a3ba6a294556e9b843a3b479c2a
              ItemStack itemStack = container.getItem(i);
              if (!itemStack.isEmpty()) {
 diff --git a/net/minecraft/world/level/Level.java b/net/minecraft/world/level/Level.java
-index ab49bb83b51a3ac210f4c51ec48c11036912149e..4a6342ec27dca9be1c9060658a36746321b31fef 100644
+index 2af453244f4e0a1cf0a56b7e41de28b7276bf04e..b8639ed99cda45ef6e501e8ace927e4291ccadf8 100644
 --- a/net/minecraft/world/level/Level.java
 +++ b/net/minecraft/world/level/Level.java
-@@ -1504,7 +1504,7 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+@@ -1510,7 +1510,7 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
          // Paper end - Fix MC-117075 use removeAll
              if (ticker.isRemoved()) {
                  toRemove.add(ticker); // Paper - Fix MC-117075 use removeAll
@@ -511,7 +511,7 @@ index ab49bb83b51a3ac210f4c51ec48c11036912149e..4a6342ec27dca9be1c9060658a367463
                  ticker.tick();
                  // Paper start - rewrite chunk system
                  if ((++tickedEntities & 7) == 0) {
-@@ -1556,6 +1556,10 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+@@ -1562,6 +1562,10 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
          return true;
      }
  
@@ -522,7 +522,7 @@ index ab49bb83b51a3ac210f4c51ec48c11036912149e..4a6342ec27dca9be1c9060658a367463
      public boolean shouldTickBlocksAt(final BlockPos pos) {
          return this.shouldTickBlocksAt(ChunkPos.pack(pos));
      }
-@@ -2210,4 +2214,22 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+@@ -2216,4 +2220,22 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
          return this.moonrise$getEntityLookup().getEntityCount(); // Paper - rewrite chunk system
      }
      // Paper end - allow patching this logic
