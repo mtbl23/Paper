@@ -1,0 +1,24 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mtbl23 <182822903+mtbl23@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 11:31:35 -0500
+Subject: [PATCH] Use the vanilla comparator signal when an inventory's max
+ stack size was lowered
+
+The cached Lithium signal strength assumes the default max stack size. Paper API can lower it per inventory, which changes
+the signal, so those inventories use the vanilla calculation. Without this a comparator next to such a hopper evaluated a
+different level and scheduled its update a tick off from Paper. Found with the differential hopper test (seed 31, tick 1509).
+
+diff --git a/net/minecraft/world/inventory/AbstractContainerMenu.java b/net/minecraft/world/inventory/AbstractContainerMenu.java
+index 99fd3a3ba6a294556e9b843a3b479c2a6a1313e5..08557f97de8b32d62acfe2404f2cbca31f90cb5d 100644
+--- a/net/minecraft/world/inventory/AbstractContainerMenu.java
++++ b/net/minecraft/world/inventory/AbstractContainerMenu.java
+@@ -909,7 +909,8 @@ public abstract class AbstractContainerMenu {
+ 
+         float totalPercent = 0.0F;
+ 
+-        if (net.caffeinemc.mods.lithium.common.SleepingBlockEntityConfig.ENABLED && container instanceof net.caffeinemc.mods.lithium.api.inventory.LithiumInventory optimizedInventory) return net.caffeinemc.mods.lithium.common.hopper.InventoryHelper.getLithiumStackList(optimizedInventory).getSignalStrength(container); // Leaves - Lithium Sleeping Block Entity
++        // The cached strength assumes the default max stack size; Paper API can lower it per inventory, which changes the strength
++        if (net.caffeinemc.mods.lithium.common.SleepingBlockEntityConfig.ENABLED && container.getMaxStackSize() == Container.MAX_STACK && container instanceof net.caffeinemc.mods.lithium.api.inventory.LithiumInventory optimizedInventory) return net.caffeinemc.mods.lithium.common.hopper.InventoryHelper.getLithiumStackList(optimizedInventory).getSignalStrength(container); // Leaves - Lithium Sleeping Block Entity
+         for (int i = 0; i < container.getContainerSize(); i++) {
+             ItemStack itemStack = container.getItem(i);
+             if (!itemStack.isEmpty()) {
