@@ -1,0 +1,22 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mtbl23 <182822903+mtbl23@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 12:04:48 -0500
+Subject: [PATCH] Limit an oversized hopper stack after a fast path insert, as
+ Paper's setItem does
+
+A stack above its item's maximum (made with /data merge or /item replace) was left at count-1 by the fast path but is cut to
+the maximum by Paper's push. Found with the differential test using commands.
+
+diff --git a/net/minecraft/world/level/block/entity/HopperBlockEntity.java b/net/minecraft/world/level/block/entity/HopperBlockEntity.java
+index 277219bf18d654079ee86a76f60988af49cd8c59..cfd03c13aef01a411713d8c63395e0071e400306 100644
+--- a/net/minecraft/world/level/block/entity/HopperBlockEntity.java
++++ b/net/minecraft/world/level/block/entity/HopperBlockEntity.java
+@@ -1564,6 +1564,8 @@ public class HopperBlockEntity extends RandomizableContainerBlockEntity implemen
+                 if (!transferStack.isEmpty()) {
+                     boolean transferSuccess = net.caffeinemc.mods.lithium.common.hopper.HopperHelper.tryMoveSingleItem(insertInventory, transferStack, fromDirection);
+                     if (transferSuccess) {
++                        // Paper stores the remainder with setItem, which limits an oversized stack (made with commands or NBT) to its maximum
++                        transferStack.limitSize(hopperBlockEntity.getMaxStackSize(transferStack));
+                         if (insertInventoryWasEmptyHopperNotDisabled) {
+                             HopperBlockEntity receivingHopper = (HopperBlockEntity) insertInventory;
+                             int k = world.spigotConfig.hopperTransfer; // Spigot
