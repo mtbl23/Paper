@@ -1,0 +1,212 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mtbl23 <182822903+mtbl23@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 17:04:22 -0500
+Subject: [PATCH] Add item stack change tracking
+
+Item stacks and their component maps publish count and component changes to subscribers, so inventories can detect
+in-place stack modifications. Adapted from Lithium (LGPL-3.0, CaffeineMC, 2No2Name) via Leaf/Leaves.
+
+diff --git a/net/minecraft/core/component/PatchedDataComponentMap.java b/net/minecraft/core/component/PatchedDataComponentMap.java
+index 4b77109e8bc5eb1ad7da9ec5684e7d61b5358565..1b15072c039252f1764db11d3694e9c940898b0b 100644
+--- a/net/minecraft/core/component/PatchedDataComponentMap.java
++++ b/net/minecraft/core/component/PatchedDataComponentMap.java
+@@ -13,10 +13,11 @@ import java.util.Map.Entry;
+ import java.util.stream.Collectors;
+ import org.jspecify.annotations.Nullable;
+ 
+-public final class PatchedDataComponentMap implements DataComponentMap {
++public final class PatchedDataComponentMap implements DataComponentMap, net.caffeinemc.mods.lithium.common.util.change_tracking.ChangePublisher<PatchedDataComponentMap> { // Lithium (via Leaf) - item change tracking
+     private final DataComponentMap prototype;
+     private Reference2ObjectMap<DataComponentType<?>, Object> patch;
+     private boolean copyOnWrite;
++    private net.caffeinemc.mods.lithium.common.util.change_tracking.ChangeSubscriber<PatchedDataComponentMap> subscriber; // Lithium (via Leaf) - item change tracking
+ 
+     public PatchedDataComponentMap(final DataComponentMap prototype) {
+         this(prototype, Reference2ObjectMaps.emptyMap(), true);
+@@ -134,6 +135,11 @@ public final class PatchedDataComponentMap implements DataComponentMap {
+     }
+ 
+     private void ensureMapOwnership() {
++        // Lithium (via Leaf) start - item change tracking
++        if (this.subscriber != null) {
++            this.subscriber.lithium$notify(this, 0);
++        }
++        // Lithium (via Leaf) end - item change tracking
+         if (this.copyOnWrite) {
+             this.patch = new Reference2ObjectArrayMap<>(this.patch);
+             this.copyOnWrite = false;
+@@ -217,6 +223,22 @@ public final class PatchedDataComponentMap implements DataComponentMap {
+         return this.patch.isEmpty() ? this.prototype : this.copy();
+     }
+ 
++    // Lithium (via Leaf) start - item change tracking
++    @Override
++    public void lithium$subscribe(final net.caffeinemc.mods.lithium.common.util.change_tracking.ChangeSubscriber<PatchedDataComponentMap> subscriber, final int subscriberData) {
++        if (subscriberData != 0) {
++            throw new UnsupportedOperationException("ComponentMapImpl does not support subscriber data");
++        }
++        this.subscriber = net.caffeinemc.mods.lithium.common.util.change_tracking.ChangeSubscriber.combine(this.subscriber, 0, subscriber, 0);
++    }
++
++    @Override
++    public int lithium$unsubscribe(final net.caffeinemc.mods.lithium.common.util.change_tracking.ChangeSubscriber<PatchedDataComponentMap> subscriber) {
++        this.subscriber = net.caffeinemc.mods.lithium.common.util.change_tracking.ChangeSubscriber.without(this.subscriber, subscriber);
++        return 0;
++    }
++    // Lithium (via Leaf) end - item change tracking
++
+     @Override
+     public boolean equals(final Object obj) {
+         return this == obj || obj instanceof PatchedDataComponentMap otherMap && this.prototype.equals(otherMap.prototype) && this.patch.equals(otherMap.patch);
+diff --git a/net/minecraft/world/item/ItemStack.java b/net/minecraft/world/item/ItemStack.java
+index 00861318771cd184c9f75a9a036deee9ec2ba310..ad8159bca8177f74078eb7982643da2f916c625a 100644
+--- a/net/minecraft/world/item/ItemStack.java
++++ b/net/minecraft/world/item/ItemStack.java
+@@ -100,7 +100,7 @@ import org.apache.commons.lang3.mutable.MutableBoolean;
+ import org.jspecify.annotations.Nullable;
+ import org.slf4j.Logger;
+ 
+-public final class ItemStack implements DataComponentHolder, ItemInstance {
++public final class ItemStack implements DataComponentHolder, ItemInstance, net.caffeinemc.mods.lithium.common.util.change_tracking.ChangePublisher<ItemStack>, net.caffeinemc.mods.lithium.common.util.change_tracking.ChangeSubscriber<PatchedDataComponentMap> { // Lithium (via Leaf) - item change tracking
+     private static final List<Component> OP_NBT_WARNING = List.of(
+         Component.translatable("item.op_warning.line1").withStyle(ChatFormatting.RED, ChatFormatting.BOLD),
+         Component.translatable("item.op_warning.line2").withStyle(ChatFormatting.RED),
+@@ -157,6 +157,10 @@ public final class ItemStack implements DataComponentHolder, ItemInstance {
+     @Deprecated
+     private @Nullable Holder<Item> item;
+     private PatchedDataComponentMap components;
++    // Lithium (via Leaf) start - item change tracking
++    private net.caffeinemc.mods.lithium.common.util.change_tracking.@Nullable ChangeSubscriber<ItemStack> subscriber;
++    private int subscriberData;
++    // Lithium (via Leaf) end - item change tracking
+ 
+     public static DataResult<ItemStack> validateStrict(final ItemStack itemStack) {
+         DataResult<?> result = validateComponents(itemStack.getComponents());
+@@ -1244,10 +1248,17 @@ public final class ItemStack implements DataComponentHolder, ItemInstance {
+     // CraftBukkit start
+     @Deprecated
+     public void setItem(Item item) {
++        // Lithium (via Leaf) start - item change tracking
++        if (this.subscriber != null) {
++            this.subscriber.lithium$notify(this, this.subscriberData);
++            this.components.lithium$unsubscribe(this);
++        }
++        // Lithium (via Leaf) end - item change tracking
+         this.item = item.builtInRegistryHolder();
+         // Paper start - change base component prototype
+         final DataComponentPatch patch = this.getComponentsPatch();
+         this.components = new PatchedDataComponentMap(this.item.components());
++        if (this.subscriber != null) this.startTrackingChanges(); // Lithium (via Leaf) - item change tracking
+         this.applyComponents(patch);
+         // Paper end - change base component prototype
+     }
+@@ -1303,6 +1314,21 @@ public final class ItemStack implements DataComponentHolder, ItemInstance {
+     }
+ 
+     public void setCount(final int count) {
++        // Lithium (via Leaf) start - item change tracking
++        if (count != this.count) {
++            if (this.subscriber instanceof net.caffeinemc.mods.lithium.common.util.change_tracking.ChangeSubscriber.CountChangeSubscriber<ItemStack> countChangeSubscriber) {
++                countChangeSubscriber.lithium$notifyCount(this, this.subscriberData, count);
++            }
++            if (count == 0) {
++                this.components.lithium$unsubscribe(this);
++                if (this.subscriber != null) {
++                    this.subscriber.lithium$forceUnsubscribe(this, this.subscriberData);
++                    this.subscriber = null;
++                    this.subscriberData = 0;
++                }
++            }
++        }
++        // Lithium (via Leaf) end - item change tracking
+         this.count = count;
+     }
+ 
+@@ -1370,4 +1396,87 @@ public final class ItemStack implements DataComponentHolder, ItemInstance {
+             .or(() -> Optional.ofNullable(this.getItem().getItemDamageSource(attacker)))
+             .orElseGet(attacker::createDamageSource);
+     }
++
++    // Lithium (via Leaf) start - item change tracking
++    @Override
++    public void lithium$subscribe(final net.caffeinemc.mods.lithium.common.util.change_tracking.ChangeSubscriber<ItemStack> subscriber, final int subscriberData) {
++        if (this.isEmpty()) {
++            throw new IllegalStateException("Cannot subscribe to an empty ItemStack!");
++        }
++
++        if (this.subscriber == null) {
++            this.startTrackingChanges();
++        }
++        this.subscriber = net.caffeinemc.mods.lithium.common.util.change_tracking.ChangeSubscriber.combine(this.subscriber, this.subscriberData, subscriber, subscriberData);
++        if (this.subscriber instanceof net.caffeinemc.mods.lithium.common.util.change_tracking.ChangeSubscriber.Multi<?>) {
++            this.subscriberData = 0;
++        } else {
++            this.subscriberData = subscriberData;
++        }
++    }
++
++    @Override
++    public int lithium$unsubscribe(final net.caffeinemc.mods.lithium.common.util.change_tracking.ChangeSubscriber<ItemStack> subscriber) {
++        if (this.isEmpty()) {
++            throw new IllegalStateException("Cannot unsubscribe from an empty ItemStack!");
++        }
++
++        int retval = net.caffeinemc.mods.lithium.common.util.change_tracking.ChangeSubscriber.dataOf(this.subscriber, subscriber, this.subscriberData);
++        this.subscriberData = net.caffeinemc.mods.lithium.common.util.change_tracking.ChangeSubscriber.dataWithout(this.subscriber, subscriber, this.subscriberData);
++        this.subscriber = net.caffeinemc.mods.lithium.common.util.change_tracking.ChangeSubscriber.without(this.subscriber, subscriber);
++
++        if (this.subscriber == null) {
++            this.components.lithium$unsubscribe(this);
++        }
++        return retval;
++    }
++
++    @Override
++    public void lithium$unsubscribeWithData(final net.caffeinemc.mods.lithium.common.util.change_tracking.ChangeSubscriber<ItemStack> subscriber, final int subscriberData) {
++        if (this.isEmpty()) {
++            throw new IllegalStateException("Cannot unsubscribe from an empty ItemStack!");
++        }
++
++        this.subscriberData = net.caffeinemc.mods.lithium.common.util.change_tracking.ChangeSubscriber.dataWithout(this.subscriber, subscriber, this.subscriberData, subscriberData, true);
++        this.subscriber = net.caffeinemc.mods.lithium.common.util.change_tracking.ChangeSubscriber.without(this.subscriber, subscriber, subscriberData, true);
++
++        if (this.subscriber == null) {
++            this.components.lithium$unsubscribe(this);
++        }
++    }
++
++    @Override
++    public boolean lithium$isSubscribedWithData(final net.caffeinemc.mods.lithium.common.util.change_tracking.ChangeSubscriber<ItemStack> subscriber, final int subscriberData) {
++        if (this.isEmpty()) {
++            throw new IllegalStateException("Cannot be subscribed to an empty ItemStack!");
++        }
++
++        return net.caffeinemc.mods.lithium.common.util.change_tracking.ChangeSubscriber.containsSubscriber(this.subscriber, this.subscriberData, subscriber, subscriberData);
++    }
++
++    @Override
++    public void lithium$forceUnsubscribe(final PatchedDataComponentMap publisher, final int subscriberData) {
++        if (publisher != this.components) {
++            throw new IllegalStateException("Invalid publisher, expected " + this.components + " but got " + publisher);
++        }
++        this.subscriber.lithium$forceUnsubscribe(this, this.subscriberData);
++        this.subscriber = null;
++        this.subscriberData = 0;
++    }
++
++    @Override
++    public void lithium$notify(final PatchedDataComponentMap publisher, final int subscriberData) {
++        if (publisher != this.components) {
++            throw new IllegalStateException("Invalid publisher, expected " + this.components + " but got " + publisher);
++        }
++
++        if (this.subscriber != null) {
++            this.subscriber.lithium$notify(this, this.subscriberData);
++        }
++    }
++
++    private void startTrackingChanges() {
++        this.components.lithium$subscribe(this, 0);
++    }
++    // Lithium (via Leaf) end - item change tracking
+ }

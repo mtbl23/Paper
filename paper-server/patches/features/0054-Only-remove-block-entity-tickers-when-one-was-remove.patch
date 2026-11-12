@@ -1,0 +1,43 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mtbl23 <182822903+mtbl23@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 17:17:05 -0500
+Subject: [PATCH] Only remove block entity tickers when one was removed
+
+tickBlockEntities always ran removeAll over the whole ticker list, even when the set to remove held only null. The set
+is now built lazily; null cannot be in the list (the loop would already have thrown on it), so behaviour is unchanged.
+
+diff --git a/net/minecraft/world/level/Level.java b/net/minecraft/world/level/Level.java
+index 4a6342ec27dca9be1c9060658a36746321b31fef..d693c057340c2cc8f09303e40855d11050ec42a0 100644
+--- a/net/minecraft/world/level/Level.java
++++ b/net/minecraft/world/level/Level.java
+@@ -1497,12 +1497,17 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+ 
+         int tickedEntities = 0; // Paper - rewrite chunk system
+         // Paper start - Fix MC-117075 use removeAll
+-        final it.unimi.dsi.fastutil.objects.ReferenceOpenHashSet<@Nullable TickingBlockEntity> toRemove = new it.unimi.dsi.fastutil.objects.ReferenceOpenHashSet<>();
+-        toRemove.add(null);
++        // Only built when a ticker was removed: an empty removeAll still walked the whole ticker list (and null cannot be in it,
++        // the loop below would have thrown on it)
++        it.unimi.dsi.fastutil.objects.ReferenceOpenHashSet<@Nullable TickingBlockEntity> toRemove = null;
+         for (int tickerIndex = 0; tickerIndex < this.blockEntityTickers.size(); tickerIndex++) {
+             final TickingBlockEntity ticker = this.blockEntityTickers.get(tickerIndex);
+         // Paper end - Fix MC-117075 use removeAll
+             if (ticker.isRemoved()) {
++                if (toRemove == null) {
++                    toRemove = new it.unimi.dsi.fastutil.objects.ReferenceOpenHashSet<>();
++                    toRemove.add(null);
++                }
+                 toRemove.add(ticker); // Paper - Fix MC-117075 use removeAll
+             } else if (tickBlockEntities && this.shouldTickBlockEntityAt(ticker.getPos())) { // Lithium - a sleeping block entity ticker has no position and does nothing
+                 ticker.tick();
+@@ -1514,7 +1519,9 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+             }
+         }
+ 
+-        this.blockEntityTickers.removeAll(toRemove); // Paper - Fix MC-117075 use removeAll
++        if (toRemove != null) {
++            this.blockEntityTickers.removeAll(toRemove); // Paper - Fix MC-117075 use removeAll
++        }
+         this.tickingBlockEntities = false;
+     }
+ 
