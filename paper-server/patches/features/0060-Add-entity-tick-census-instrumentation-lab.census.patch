@@ -1,0 +1,48 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mtbl23 <mbhangal23@gmail.com>
+Date: Fri, 13 Nov 2026 10:08:49 -0500
+Subject: [PATCH] Add entity tick census instrumentation (lab.census)
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+
+diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
+index 8215ce08fd63c3871e61d23238f8f7da5277f314..6046e68067593bf5fca73740dd8ed7bd3ca67307 100644
+--- a/net/minecraft/server/level/ServerLevel.java
++++ b/net/minecraft/server/level/ServerLevel.java
+@@ -198,6 +198,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+     private final MinecraftServer server;
+     public final io.papermc.paper.world.saveddata.PaperLevelOverrides serverLevelData; // Paper - type
+     private final EntityTickList entityTickList = new EntityTickList();
++    private final io.papermc.paper.lab.EntityTickCensus labCensus = new io.papermc.paper.lab.EntityTickCensus(this.dimension().identifier().getPath()); // lab census
+     private final ServerWaypointManager waypointManager;
+     private EnvironmentAttributeSystem environmentAttributes;
+     private @Nullable WorldBorder cachedWorldBorder; // Leaf port - cache world border
+@@ -890,6 +891,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+             }
+ 
+             io.papermc.paper.entity.activation.ActivationRange.activateEntities(this); // Paper - EAR
++            if (io.papermc.paper.lab.EntityTickCensus.ON) this.labCensus.begin(); // lab census
+             this.entityTickList
+                 .forEach(
+                     entity -> {
+@@ -909,6 +911,12 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+                                     }
+ 
+                                     profiler.push("tick");
++                                    if (io.papermc.paper.lab.EntityTickCensus.ON) { // lab census
++                                        final long labT0 = System.nanoTime();
++                                        this.guardEntityTick(this::tickNonPassenger, entity);
++                                        final net.minecraft.world.level.ChunkPos labPos = entity.chunkPosition();
++                                        this.labCensus.record(entity.getType().builtInRegistryHolder().key().identifier().getPath(), labPos.x(), labPos.z(), System.nanoTime() - labT0);
++                                    } else
+                                     this.guardEntityTick(this::tickNonPassenger, entity);
+                                     profiler.pop();
+                                 }
+@@ -916,6 +924,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+                         }
+                     }
+                 );
++            if (io.papermc.paper.lab.EntityTickCensus.ON) this.labCensus.end(); // lab census
+             if (this.paperConfig().unsupportedSettings.ticking.blockEntities) { // Paper - option to disable ticking
+             profiler.popPush("blockEntities");
+             this.tickBlockEntities();
