@@ -1,0 +1,234 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mtbl23 <mbhangal23@gmail.com>
+Date: Fri, 13 Nov 2026 10:18:11 -0500
+Subject: [PATCH] Lab only: ablation switches (-Dlab.ablate.X) to measure the
+ ceiling of behaviour-loosening levers
+
+
+diff --git a/net/minecraft/server/LabAblate.java b/net/minecraft/server/LabAblate.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..0592775865bc1fcd08d70025f1da3651ff3e9867
+--- /dev/null
++++ b/net/minecraft/server/LabAblate.java
+@@ -0,0 +1,99 @@
++package net.minecraft.server;
++
++import it.unimi.dsi.fastutil.longs.Long2BooleanOpenHashMap;
++import net.minecraft.server.level.ServerLevel;
++import net.minecraft.server.level.ServerPlayer;
++import net.minecraft.world.entity.Entity;
++
++/**
++ * Lab only, ablation study: crude switches that completely skip a candidate piece of non-player simulation, to measure how many
++ * ms/tick each would free if it were free. All off by default. Each lever is a system property lab.ablate.&lt;name&gt;:
++ * "true" skips the work only where no player is within a radius (32 blocks, 48 for items; override with lab.ablate.radius),
++ * "all" skips it everywhere. Distances are horizontal and measured to the nearest point of the chunk the work belongs to, in the
++ * same dimension, cached per chunk per tick. Never part of a shipped build: this changes behaviour on purpose.
++ */
++public final class LabAblate {
++    public static final int SPAWN = 0, TRACKER = 1, AI = 2, ITEMS = 3, RANDOM = 4, COLLIDE = 5, BLOCKENT = 6, N = 7;
++    private static final String[] NAMES = {"spawn", "tracker", "ai", "items", "random", "collide", "blockent"};
++    public static final boolean[] ON = new boolean[N];
++    private static final boolean[] ALL = new boolean[N];
++    private static final long[] RADIUS_SQ = new long[N];
++
++    static {
++        final int override = Integer.getInteger("lab.ablate.radius", -1);
++        for (int i = 0; i < N; i++) {
++            final String v = System.getProperty("lab.ablate." + NAMES[i]);
++            ON[i] = v != null && !v.equals("false");
++            ALL[i] = "all".equals(v);
++            final long r = override >= 0 ? override : (i == ITEMS ? 48 : 32);
++            RADIUS_SQ[i] = r * r;
++        }
++    }
++
++    /** Per-level cache: chunk key -> a player is within the lever's radius, valid for one server tick per lever. */
++    public static final class Cache {
++        private final Long2BooleanOpenHashMap[] near = new Long2BooleanOpenHashMap[N];
++        private final int[] stamp = new int[N];
++
++        public Cache() {
++            for (int i = 0; i < N; i++) {
++                this.near[i] = new Long2BooleanOpenHashMap();
++                this.stamp[i] = -1;
++            }
++        }
++    }
++
++    private LabAblate() {}
++
++    /** True when the lever's work for a thing in chunk (cx, cz) of this level should be skipped. */
++    public static boolean skipChunk(final int lever, final ServerLevel level, final int cx, final int cz) {
++        if (ALL[lever]) {
++            return true;
++        }
++        final Cache c = level.labAblate;
++        final int now = level.getServer().getTickCount();
++        final Long2BooleanOpenHashMap map = c.near[lever];
++        if (c.stamp[lever] != now) {
++            map.clear();
++            c.stamp[lever] = now;
++        }
++        final long key = (cx & 0xFFFFFFFFL) | ((long)cz << 32);
++        if (map.containsKey(key)) {
++            return !map.get(key);
++        }
++        final long minX = (long)cx << 4, maxX = minX + 15, minZ = (long)cz << 4, maxZ = minZ + 15;
++        boolean near = false;
++        for (final ServerPlayer player : level.players()) {
++            final double px = player.getX(), pz = player.getZ();
++            final double dx = Math.max(Math.max(minX - px, px - maxX), 0.0);
++            final double dz = Math.max(Math.max(minZ - pz, pz - maxZ), 0.0);
++            if (dx * dx + dz * dz <= RADIUS_SQ[lever]) {
++                near = true;
++                break;
++            }
++        }
++        map.put(key, near);
++        return !near;
++    }
++
++    public static boolean skipEntity(final int lever, final Entity entity) {
++        if (ALL[lever]) {
++            return true;
++        }
++        return entity.level() instanceof ServerLevel level && skipChunk(lever, level, net.minecraft.util.Mth.floor(entity.getX()) >> 4, net.minecraft.util.Mth.floor(entity.getZ()) >> 4);
++    }
++
++    public static boolean skipBlock(final int lever, final ServerLevel level, final net.minecraft.core.BlockPos pos) {
++        return ALL[lever] || skipChunk(lever, level, pos.getX() >> 4, pos.getZ() >> 4);
++    }
++
++    public static boolean isAll(final int lever) {
++        return ALL[lever];
++    }
++
++    /** Item entities, experience orbs, villagers and animals (lever ITEMS). */
++    public static boolean isItemLike(final Entity entity) {
++        return entity instanceof net.minecraft.world.entity.item.ItemEntity || entity instanceof net.minecraft.world.entity.ExperienceOrb
++            || entity instanceof net.minecraft.world.entity.npc.villager.Villager || entity instanceof net.minecraft.world.entity.animal.Animal;
++    }
++}
+diff --git a/net/minecraft/server/level/ChunkMap.java b/net/minecraft/server/level/ChunkMap.java
+index fd0b9f20fbdd523d51550fd6009b5011e6e7e6e6..0d58b7f26c8d2869ac5db191b500e3ea2f005945 100644
+--- a/net/minecraft/server/level/ChunkMap.java
++++ b/net/minecraft/server/level/ChunkMap.java
+@@ -1104,6 +1104,9 @@ public class ChunkMap extends SimpleRegionStorage implements ChunkHolder.PlayerP
+                 if (tracker == null) {
+                     continue;
+                 }
++                if (net.minecraft.server.LabAblate.ON[net.minecraft.server.LabAblate.TRACKER] && !(entity instanceof ServerPlayer) && net.minecraft.server.LabAblate.skipEntity(net.minecraft.server.LabAblate.TRACKER, entity)) {
++                    continue; // Lab only: ablation
++                }
+                 ((ca.spottedleaf.moonrise.patches.entity_tracker.EntityTrackerTrackedEntity)tracker).moonrise$tick(((ca.spottedleaf.moonrise.patches.chunk_system.entity.ChunkSystemEntity)entity).moonrise$getChunkData().nearbyPlayers);
+                 if (((ca.spottedleaf.moonrise.patches.entity_tracker.EntityTrackerTrackedEntity)tracker).moonrise$hasPlayers()
+                     || ((ca.spottedleaf.moonrise.patches.chunk_system.entity.ChunkSystemEntity)entity).moonrise$getChunkStatus().isOrAfter(FullChunkStatus.ENTITY_TICKING)) {
+diff --git a/net/minecraft/server/level/ServerChunkCache.java b/net/minecraft/server/level/ServerChunkCache.java
+index 09bffd36110c5028da5b13e4edbd39d238a7dc02..06ca521785d1d42f9020cfd70abc486c3e228e00 100644
+--- a/net/minecraft/server/level/ServerChunkCache.java
++++ b/net/minecraft/server/level/ServerChunkCache.java
+@@ -175,7 +175,9 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
+ 
+         java.util.Objects.checkFromToIndex(0, size, raw.length);
+         for (int i = 0; i < size; ++i) {
+-            world.tickChunk(raw[i], randomTickSpeed);
++            if (!(net.minecraft.server.LabAblate.ON[net.minecraft.server.LabAblate.RANDOM] && net.minecraft.server.LabAblate.skipChunk(net.minecraft.server.LabAblate.RANDOM, world, raw[i].getPos().x(), raw[i].getPos().z()))) { // Lab only: ablation
++                world.tickChunk(raw[i], randomTickSpeed);
++            }
+ 
+             // call mid-tick tasks for chunk system
+             if ((i & 7) == 0) {
+@@ -562,7 +564,9 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
+         int chunkCount = this.distanceManager.getNaturalSpawnChunkCount();
+         // Paper start - Optional per player mob spawns
+         NaturalSpawner.SpawnState spawnCookie;
+-        if ((this.spawnFriendlies || this.spawnEnemies) && this.level.paperConfig().entities.spawning.perPlayerMobSpawns) { // don't count mobs when animals and monsters are disabled
++        if (net.minecraft.server.LabAblate.ON[net.minecraft.server.LabAblate.SPAWN] && this.lastSpawnState != null && this.level.getServer().getTickCount() % 100 != 0) { // Lab only: ablation, recount every 100 ticks
++            spawnCookie = this.lastSpawnState;
++        } else if ((this.spawnFriendlies || this.spawnEnemies) && this.level.paperConfig().entities.spawning.perPlayerMobSpawns) { // don't count mobs when animals and monsters are disabled
+             // re-set mob counts
+             for (ServerPlayer player : this.level.players()) {
+                 // Paper start - per player mob spawning backoff
+@@ -627,7 +631,7 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
+         profiler.popPush("tickTickingChunks");
+         this.iterateTickingChunksFaster(); // Paper - chunk tick iteration optimizations
+         if (net.minecraft.server.LabPhase.ON) net.minecraft.server.LabPhase.add(net.minecraft.server.LabPhase.RANDOMTICK, labRt);
+-        if (doMobSpawning) {
++        if (doMobSpawning && !(net.minecraft.server.LabAblate.ON[net.minecraft.server.LabAblate.SPAWN] && net.minecraft.server.LabAblate.isAll(net.minecraft.server.LabAblate.SPAWN))) { // Lab only: ablation
+             final long labCu = net.minecraft.server.LabPhase.ON ? net.minecraft.server.LabPhase.t() : 0L;
+             profiler.popPush("customSpawners");
+             this.level.tickCustomSpawners(this.spawnEnemies);
+@@ -646,7 +650,7 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
+         }
+         if (net.minecraft.server.LabPhase.ON) net.minecraft.server.LabPhase.add(net.minecraft.server.LabPhase.TICKTHUNDER, labTh);
+ 
+-        if (!spawningCategories.isEmpty()) {
++        if (!spawningCategories.isEmpty() && !(net.minecraft.server.LabAblate.ON[net.minecraft.server.LabAblate.SPAWN] && net.minecraft.server.LabAblate.skipChunk(net.minecraft.server.LabAblate.SPAWN, this.level, chunkPos.x(), chunkPos.z()))) { // Lab only: ablation
+             if (this.level.getWorldBorder().isWithinBounds(chunkPos)) { // Paper - rewrite chunk system
+                 final long labSf = net.minecraft.server.LabPhase.ON ? net.minecraft.server.LabPhase.t() : 0L;
+                 NaturalSpawner.spawnForChunk(this.level, chunk, spawnCookie, spawningCategories);
+diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
+index 98bf90ad1abe475dd3c118eac0c976e040d96231..0563790790c21d98ecaa65cc777641055d962c1a 100644
+--- a/net/minecraft/server/level/ServerLevel.java
++++ b/net/minecraft/server/level/ServerLevel.java
+@@ -901,6 +901,9 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+                 .forEach(
+                     entity -> {
+                         if (!entity.isRemoved()) {
++                            if (net.minecraft.server.LabAblate.ON[net.minecraft.server.LabAblate.ITEMS] && net.minecraft.server.LabAblate.isItemLike(entity) && net.minecraft.server.LabAblate.skipEntity(net.minecraft.server.LabAblate.ITEMS, entity)) {
++                                return; // Lab only: ablation
++                            }
+                             if (!tickRateManager.isEntityFrozen(entity)) {
+                                 profiler.push("checkDespawn");
+                                 entity.checkDespawn();
+@@ -1031,6 +1034,8 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+     }
+     // Paper end - optimise random ticking
+ 
++    public final net.minecraft.server.LabAblate.Cache labAblate = new net.minecraft.server.LabAblate.Cache(); // Lab only: ablation
++
+     public void tickChunk(final LevelChunk chunk, final int tickSpeed) {
+         final ca.spottedleaf.moonrise.common.util.SimpleThreadUnsafeRandom simpleRandom = this.simpleRandom; // Paper - optimise random ticking
+         ChunkPos chunkPos = chunk.getPos();
+diff --git a/net/minecraft/world/entity/LivingEntity.java b/net/minecraft/world/entity/LivingEntity.java
+index 59cac2f3b12d1d6ab5a715ceff01774bf54b3506..e4b8e1316edb6b3186de070c741755937f47c94d 100644
+--- a/net/minecraft/world/entity/LivingEntity.java
++++ b/net/minecraft/world/entity/LivingEntity.java
+@@ -3898,6 +3898,9 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+     }
+ 
+     protected void pushEntities() {
++        if (net.minecraft.server.LabAblate.ON[net.minecraft.server.LabAblate.COLLIDE] && !(this instanceof Player) && net.minecraft.server.LabAblate.skipEntity(net.minecraft.server.LabAblate.COLLIDE, this)) {
++            return; // Lab only: ablation, no entity pushing, collision cap or cramming
++        }
+         // Paper start - don't run getEntities if we're not going to use its result
+         if (!this.isPushable()) {
+             return;
+diff --git a/net/minecraft/world/entity/Mob.java b/net/minecraft/world/entity/Mob.java
+index 0e928f7c38e7cf32bcc7412ac413b3ebdc9674c9..7bd81130381bcd6b6b61bd70fa33c6410576c045 100644
+--- a/net/minecraft/world/entity/Mob.java
++++ b/net/minecraft/world/entity/Mob.java
+@@ -820,6 +820,9 @@ public abstract class Mob extends LivingEntity implements Targeting, EquipmentUs
+     @Override
+     protected final void serverAiStep() {
+         this.noActionTime++;
++        if (net.minecraft.server.LabAblate.ON[net.minecraft.server.LabAblate.AI] && net.minecraft.server.LabAblate.skipEntity(net.minecraft.server.LabAblate.AI, this)) {
++            return; // Lab only: ablation, no sensing, goals, brain, navigation or controls
++        }
+         // Paper start - Allow nerfed mobs to jump and float
+         if (!this.aware) {
+             if (this.goalFloat != null) {
+diff --git a/net/minecraft/world/level/Level.java b/net/minecraft/world/level/Level.java
+index 74a37fdaeb86c191e1fed6d922c23fa1f77c5a2f..a4d5c12c20ba4f72cc6482d3811a31c5ea905066 100644
+--- a/net/minecraft/world/level/Level.java
++++ b/net/minecraft/world/level/Level.java
+@@ -1517,6 +1517,8 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+                     toRemove.add(null);
+                 }
+                 toRemove.add(ticker); // Paper - Fix MC-117075 use removeAll
++            } else if (net.minecraft.server.LabAblate.ON[net.minecraft.server.LabAblate.BLOCKENT] && (net.minecraft.server.LabAblate.isAll(net.minecraft.server.LabAblate.BLOCKENT) || (this instanceof ServerLevel labLevel && net.minecraft.server.LabAblate.skipBlock(net.minecraft.server.LabAblate.BLOCKENT, labLevel, ticker.getPos())))) { // Lab only: ablation, checked before the loaded-chunk test so the ceiling is the bare list walk
++                continue;
+             } else if (tickBlockEntities && this.shouldTickBlockEntityAt(ticker.getPos())) { // Lithium - a sleeping block entity ticker has no position and does nothing
+                 ticker.tick();
+                 // Paper start - rewrite chunk system
