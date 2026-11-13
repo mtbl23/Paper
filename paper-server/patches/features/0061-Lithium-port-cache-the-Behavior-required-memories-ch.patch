@@ -17,7 +17,7 @@ based on Lithium by 2No2Name (LGPL-3.0-only). Leaf: https://github.com/Winds-Stu
 Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
 
 diff --git a/net/minecraft/world/entity/ai/Brain.java b/net/minecraft/world/entity/ai/Brain.java
-index 946ef5b3a72d58a7f9f2cf992436b3611f71be39..d87923b77a899b06bfde5d59f658097c92f2414f 100644
+index 946ef5b3a72d58a7f9f2cf992436b3611f71be39..13880a8d5d8e772ddb4f5bb87afaaf51068fd82d 100644
 --- a/net/minecraft/world/entity/ai/Brain.java
 +++ b/net/minecraft/world/entity/ai/Brain.java
 @@ -48,6 +48,14 @@ public class Brain<E extends LivingEntity> {
@@ -94,7 +94,7 @@ index 946ef5b3a72d58a7f9f2cf992436b3611f71be39..d87923b77a899b06bfde5d59f658097c
                  slot.set(value);
              }
          }
-@@ -424,7 +454,16 @@ public class Brain<E extends LivingEntity> {
+@@ -424,7 +454,17 @@ public class Brain<E extends LivingEntity> {
      }
  
      private void forgetOutdatedMemories() {
@@ -102,8 +102,9 @@ index 946ef5b3a72d58a7f9f2cf992436b3611f71be39..d87923b77a899b06bfde5d59f658097c
 +        // Leaf port start - a slot that expires clears its value, which is a state change
 +        this.memories.values().forEach(slot -> {
 +            if (slot.canExpire()) {
++                boolean hadValue = slot.hasValue();
 +                slot.tick();
-+                if (!slot.hasValue()) {
++                if (hadValue && !slot.hasValue()) {
 +                    this.memoryStateVersion++;
 +                }
 +            }
