@@ -1,0 +1,94 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mtbl23 <mbhangal23@gmail.com>
+Date: Fri, 13 Nov 2026 00:11:23 -0500
+Subject: [PATCH] Entity deep: update waypoint connections without views and
+ copied entry sets
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+
+diff --git a/net/minecraft/server/waypoints/ServerWaypointManager.java b/net/minecraft/server/waypoints/ServerWaypointManager.java
+index b9748a392c9f76e61a1b673085b4dd74c007c70d..954558c0ff051f15e702be0b51f6c19d9d52e487 100644
+--- a/net/minecraft/server/waypoints/ServerWaypointManager.java
++++ b/net/minecraft/server/waypoints/ServerWaypointManager.java
+@@ -21,6 +21,9 @@ public class ServerWaypointManager implements WaypointManager<WaypointTransmitte
+     private final Table<ServerPlayer, WaypointTransmitter, WaypointTransmitter.Connection> connections = HashBasedTable.create();
+     // Paper start - optimize ServerWaypointManager with locator bar disabled
+     public boolean locatorBarEnabled; // Avoid a gamerule lookup for each player
++    private static final ServerPlayer[] EMPTY_PLAYERS = new ServerPlayer[0]; // entity deep
++    private static final WaypointTransmitter[] EMPTY_TRANSMITTERS = new WaypointTransmitter[0]; // entity deep
++    private static final WaypointTransmitter.Connection[] EMPTY_CONNECTIONS = new WaypointTransmitter.Connection[0]; // entity deep
+ 
+     public ServerWaypointManager(net.minecraft.server.level.ServerLevel serverLevel) {
+         this.locatorBarEnabled = serverLevel.getGameRules().get(GameRules.LOCATOR_BAR);
+@@ -41,15 +44,30 @@ public class ServerWaypointManager implements WaypointManager<WaypointTransmitte
+     public void updateWaypoint(final WaypointTransmitter waypoint) {
+         if (!this.locatorBarEnabled) return; // Paper - optimize ServerWaypointManager with locator bar disabled
+         if (this.waypoints.contains(waypoint)) {
+-            Map<ServerPlayer, WaypointTransmitter.Connection> playerConnection = Tables.transpose(this.connections).row(waypoint);
+-            SetView<ServerPlayer> potentialPlayers = Sets.difference(this.players, playerConnection.keySet());
++            // entity deep: same order and same snapshot semantics as the Tables.transpose / ImmutableSet.copyOf version, without the views and the copied entry set
++            final Map<ServerPlayer, WaypointTransmitter.Connection> playerConnection = this.connections.column(waypoint);
++            ServerPlayer[] connectedPlayers = EMPTY_PLAYERS;
++            WaypointTransmitter.Connection[] playerConnections = EMPTY_CONNECTIONS;
++            int count = 0;
++            for (Entry<ServerPlayer, WaypointTransmitter.Connection> waypointConnection : playerConnection.entrySet()) {
++                if (count == connectedPlayers.length) {
++                    final int newLength = Math.max(4, count << 1);
++                    connectedPlayers = java.util.Arrays.copyOf(connectedPlayers, newLength);
++                    playerConnections = java.util.Arrays.copyOf(playerConnections, newLength);
++                }
++                connectedPlayers[count] = waypointConnection.getKey();
++                playerConnections[count++] = waypointConnection.getValue();
++            }
+ 
+-            for (Entry<ServerPlayer, WaypointTransmitter.Connection> waypointConnection : ImmutableSet.copyOf(playerConnection.entrySet())) {
+-                this.updateConnection(waypointConnection.getKey(), waypoint, waypointConnection.getValue());
++            for (int i = 0; i < count; i++) {
++                this.updateConnection(connectedPlayers[i], waypoint, playerConnections[i]);
+             }
+ 
+-            for (ServerPlayer player : potentialPlayers) {
+-                this.createConnection(player, waypoint);
++            // lazily evaluated like Sets.difference: a player is skipped when it has a connection at the moment it is reached
++            for (ServerPlayer player : this.players) {
++                if (!this.connections.contains(player, waypoint)) {
++                    this.createConnection(player, waypoint);
++                }
+             }
+         }
+     }
+@@ -77,15 +95,28 @@ public class ServerWaypointManager implements WaypointManager<WaypointTransmitte
+ 
+     public void updatePlayer(final ServerPlayer player) {
+         if (!this.locatorBarEnabled) return; // Paper - optimize ServerWaypointManager with locator bar disabled
+-        Map<WaypointTransmitter, WaypointTransmitter.Connection> waypointConnections = this.connections.row(player);
+-        SetView<WaypointTransmitter> potentialWaypoints = Sets.difference(this.waypoints, waypointConnections.keySet());
++        final Map<WaypointTransmitter, WaypointTransmitter.Connection> waypointConnections = this.connections.row(player);
++        WaypointTransmitter[] transmitters = EMPTY_TRANSMITTERS;
++        WaypointTransmitter.Connection[] playerConnections = EMPTY_CONNECTIONS;
++        int count = 0;
++        for (Entry<WaypointTransmitter, WaypointTransmitter.Connection> waypointConnection : waypointConnections.entrySet()) {
++            if (count == transmitters.length) {
++                final int newLength = Math.max(4, count << 1);
++                transmitters = java.util.Arrays.copyOf(transmitters, newLength);
++                playerConnections = java.util.Arrays.copyOf(playerConnections, newLength);
++            }
++            transmitters[count] = waypointConnection.getKey();
++            playerConnections[count++] = waypointConnection.getValue();
++        }
+ 
+-        for (Entry<WaypointTransmitter, WaypointTransmitter.Connection> waypointConnection : ImmutableSet.copyOf(waypointConnections.entrySet())) {
+-            this.updateConnection(player, waypointConnection.getKey(), waypointConnection.getValue());
++        for (int i = 0; i < count; i++) {
++            this.updateConnection(player, transmitters[i], playerConnections[i]);
+         }
+ 
+-        for (WaypointTransmitter waypoint : potentialWaypoints) {
+-            this.createConnection(player, waypoint);
++        for (WaypointTransmitter waypoint : this.waypoints) {
++            if (!waypointConnections.containsKey(waypoint)) {
++                this.createConnection(player, waypoint);
++            }
+         }
+     }
+ 

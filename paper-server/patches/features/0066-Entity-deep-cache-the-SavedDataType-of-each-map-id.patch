@@ -1,0 +1,37 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mtbl23 <mbhangal23@gmail.com>
+Date: Fri, 13 Nov 2026 00:11:23 -0500
+Subject: [PATCH] Entity deep: cache the SavedDataType of each map id
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+
+diff --git a/net/minecraft/world/level/saveddata/maps/MapItemSavedData.java b/net/minecraft/world/level/saveddata/maps/MapItemSavedData.java
+index 1c8b9c0a1f615dedca9028379a1d8f60e9c39947..27966403738669b927153f079f99b0fdb3dc90e4 100644
+--- a/net/minecraft/world/level/saveddata/maps/MapItemSavedData.java
++++ b/net/minecraft/world/level/saveddata/maps/MapItemSavedData.java
+@@ -82,10 +82,22 @@ public class MapItemSavedData extends SavedData {
+     public MapId id;
+     // CraftBukkit end
+ 
++    // entity deep: one immutable type per map id (item frames look their map up every few ticks); SavedDataType equals/hashCode only use the id
++    private static final java.util.concurrent.ConcurrentHashMap<MapId, SavedDataType<MapItemSavedData>> TYPES = new java.util.concurrent.ConcurrentHashMap<>();
++
+     public static SavedDataType<MapItemSavedData> type(final MapId id) {
+-        return new SavedDataType<>(Identifier.withDefaultNamespace(id.key()), () -> {
+-            throw new IllegalStateException("Should never create an empty map saved data");
+-        }, CODEC, DataFixTypes.SAVED_DATA_MAP_DATA);
++        SavedDataType<MapItemSavedData> type = TYPES.get(id);
++        if (type == null) {
++            type = new SavedDataType<>(Identifier.withDefaultNamespace(id.key()), () -> {
++                throw new IllegalStateException("Should never create an empty map saved data");
++            }, CODEC, DataFixTypes.SAVED_DATA_MAP_DATA);
++            final SavedDataType<MapItemSavedData> previous = TYPES.putIfAbsent(id, type);
++            if (previous != null) {
++                type = previous;
++            }
++        }
++
++        return type;
+     }
+ 
+     private MapItemSavedData(

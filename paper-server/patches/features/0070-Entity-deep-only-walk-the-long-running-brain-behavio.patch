@@ -1,0 +1,71 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mtbl23 <mbhangal23@gmail.com>
+Date: Fri, 13 Nov 2026 00:20:56 -0500
+Subject: [PATCH] Entity deep: only walk the long running brain behaviours
+ unless a OneShot started
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+
+diff --git a/net/minecraft/world/entity/ai/Brain.java b/net/minecraft/world/entity/ai/Brain.java
+index 13880a8d5d8e772ddb4f5bb87afaaf51068fd82d..d1e83415944af15d8c7de0e905845ef1a5a2ace8 100644
+--- a/net/minecraft/world/entity/ai/Brain.java
++++ b/net/minecraft/world/entity/ai/Brain.java
+@@ -332,7 +332,34 @@ public class Brain<E extends LivingEntity> {
+         return groups;
+     }
+ 
+-    private record BehaviorGroup<E extends LivingEntity>(Activity activity, BehaviorControl<? super E>[] behaviors) {
++    private static final class BehaviorGroup<E extends LivingEntity> {
++        private final Activity activity;
++        private final BehaviorControl<? super E>[] behaviors;
++        // entity deep: the behaviours that can stay RUNNING across ticks (a OneShot is only RUNNING between its start and the stop in the same tick's
++        // running pass), in the same order; and whether a OneShot of this group started since the last running pass
++        private final BehaviorControl<? super E>[] longRunning;
++        private boolean oneShotStarted = true; // true until the first running pass after the groups were (re)built, to be safe
++
++        private BehaviorGroup(final Activity activity, final BehaviorControl<? super E>[] behaviors) {
++            this.activity = activity;
++            this.behaviors = behaviors;
++            int count = 0;
++            for (BehaviorControl<? super E> behavior : behaviors) {
++                if (!(behavior instanceof net.minecraft.world.entity.ai.behavior.OneShot<?>)) {
++                    count++;
++                }
++            }
++
++            final BehaviorControl<? super E>[] longRunning = new BehaviorControl[count];
++            int i = 0;
++            for (BehaviorControl<? super E> behavior : behaviors) {
++                if (!(behavior instanceof net.minecraft.world.entity.ai.behavior.OneShot<?>)) {
++                    longRunning[i++] = behavior;
++                }
++            }
++
++            this.longRunning = longRunning;
++        }
+     }
+     // Leaf port end
+ 
+@@ -483,7 +510,9 @@ public class Brain<E extends LivingEntity> {
+             if (this.activeActivities.contains(group.activity)) {
+                 for (BehaviorControl<? super E> behavior : group.behaviors) {
+                     if (behavior.getStatus() == Behavior.Status.STOPPED) {
+-                        behavior.tryStart(level, body, time);
++                        if (behavior.tryStart(level, body, time) && behavior instanceof net.minecraft.world.entity.ai.behavior.OneShot<?>) {
++                            group.oneShotStarted = true; // entity deep
++                        }
+                     }
+                 }
+             }
+@@ -497,7 +526,10 @@ public class Brain<E extends LivingEntity> {
+         // Leaf port start - snapshot the running behaviours like getRunningBehaviors did, but allocate nothing when none is running
+         List<BehaviorControl<? super E>> running = null;
+         for (BehaviorGroup<E> group : this.behaviorGroups()) {
+-            for (BehaviorControl<? super E> behavior : group.behaviors) {
++            // entity deep: a group without a OneShot started this tick can only have long running behaviours running (same order as the full walk)
++            final BehaviorControl<? super E>[] candidates = group.oneShotStarted ? group.behaviors : group.longRunning;
++            group.oneShotStarted = false;
++            for (BehaviorControl<? super E> behavior : candidates) {
+                 if (behavior.getStatus() == Behavior.Status.RUNNING) {
+                     if (running == null) {
+                         running = new ObjectArrayList<>();

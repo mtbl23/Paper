@@ -1,0 +1,162 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mtbl23 <mbhangal23@gmail.com>
+Date: Fri, 13 Nov 2026 00:17:12 -0500
+Subject: [PATCH] Entity deep: skip Manhattan ordered block scans when no
+ section in the box can match
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+
+diff --git a/net/minecraft/world/level/LevelReader.java b/net/minecraft/world/level/LevelReader.java
+index ad225fe3eccf6d649566c47f8d6fd162fe92d6f5..a356f8660418afb88e23681b93a8422510b716fb 100644
+--- a/net/minecraft/world/level/LevelReader.java
++++ b/net/minecraft/world/level/LevelReader.java
+@@ -185,11 +185,11 @@ public interface LevelReader extends BlockAndLightGetter, CollisionGetter, Signa
+     }
+ 
+     default OrderedBlockMatcher findBlocksInBoxByManhattanDistance(final BlockPos origin, final int range) {
+-        return this.findBlocksIn(BlockPos.withinBoxByManhattanDistance(origin, range, range, range));
++        return this.findBlocksIn(BlockPos.withinBoxByManhattanDistance(origin, range, range, range)).withBox(origin, range, range, range); // entity deep
+     }
+ 
+     default OrderedBlockMatcher findBlocksInBoxByManhattanDistance(final BlockPos origin, final int rangeXZ, final int rangeY) {
+-        return this.findBlocksIn(BlockPos.withinBoxByManhattanDistance(origin, rangeXZ, rangeY, rangeXZ));
++        return this.findBlocksIn(BlockPos.withinBoxByManhattanDistance(origin, rangeXZ, rangeY, rangeXZ)).withBox(origin, rangeXZ, rangeY, rangeXZ); // entity deep
+     }
+ 
+     default OrderedBlockMatcher findBlocksInManhattan(final BlockPos origin, final int range) {
+diff --git a/net/minecraft/world/level/blockscan/OrderedBlockMatcher.java b/net/minecraft/world/level/blockscan/OrderedBlockMatcher.java
+index 95f88eb10d7c36be3cc8df4fba961e16b93ee315..be53d213ae24197b0d433998250428f57bea28a4 100644
+--- a/net/minecraft/world/level/blockscan/OrderedBlockMatcher.java
++++ b/net/minecraft/world/level/blockscan/OrderedBlockMatcher.java
+@@ -14,11 +14,70 @@ import org.apache.commons.lang3.mutable.MutableObject;
+ public class OrderedBlockMatcher extends BlockMatcher {
+     private Iterable<BlockPos> positions;
+ 
++    // entity deep: the block box behind a Manhattan ordered scan, set by LevelReader#findBlocksInBoxByManhattanDistance (null for any other position source)
++    private int boxMinX;
++    private int boxMinY;
++    private int boxMinZ;
++    private int boxMaxX;
++    private int boxMaxY;
++    private int boxMaxZ;
++    private boolean hasBox;
++
+     public OrderedBlockMatcher(final LevelReader level, final Iterable<BlockPos> positions) {
+         super(level);
+         this.positions = positions;
+     }
+ 
++    /** The positions are exactly the box origin +- (reachX, reachY, reachZ) (the Manhattan depth limit is the sum of the reaches, so nothing is cut off). */
++    public OrderedBlockMatcher withBox(final BlockPos origin, final int reachX, final int reachY, final int reachZ) {
++        this.boxMinX = origin.getX() - reachX;
++        this.boxMinY = origin.getY() - reachY;
++        this.boxMinZ = origin.getZ() - reachZ;
++        this.boxMaxX = origin.getX() + reachX;
++        this.boxMaxY = origin.getY() + reachY;
++        this.boxMaxZ = origin.getZ() + reachZ;
++        this.hasBox = true;
++        return this;
++    }
++
++    /**
++     * True when no block of the scan can pass the state filter: every section overlapping the box is in a loaded chunk and none of their palettes holds a
++     * state that passes. The full scan then finds nothing either (its section cache rejects the same sections), without walking the positions.
++     * Any doubt (not a server level, chunk not loaded, box outside the build height) returns false and the normal scan runs.
++     */
++    private boolean cannotMatch(final Predicate<BlockState> predicate) {
++        if (!this.hasBox || !(this.level instanceof net.minecraft.server.level.ServerLevel serverLevel)) {
++            return false;
++        }
++
++        if (this.boxMinY < serverLevel.getMinY() || this.boxMaxY > serverLevel.getMaxY()) {
++            return false;
++        }
++
++        final int minSectionX = this.boxMinX >> 4;
++        final int maxSectionX = this.boxMaxX >> 4;
++        final int minSectionZ = this.boxMinZ >> 4;
++        final int maxSectionZ = this.boxMaxZ >> 4;
++        final int minSectionY = this.boxMinY >> 4;
++        final int maxSectionY = this.boxMaxY >> 4;
++        for (int x = minSectionX; x <= maxSectionX; x++) {
++            for (int z = minSectionZ; z <= maxSectionZ; z++) {
++                final net.minecraft.world.level.chunk.LevelChunk chunk = serverLevel.getChunkSource().getChunkAtIfLoadedImmediately(x, z);
++                if (chunk == null) {
++                    return false;
++                }
++
++                for (int y = minSectionY; y <= maxSectionY; y++) {
++                    if (chunk.getSection(chunk.getSectionIndexFromSectionY(y)).maybeHas(predicate)) {
++                        return false;
++                    }
++                }
++            }
++        }
++
++        return true;
++    }
++
+     public OrderedBlockMatcher filterPos(final Predicate<? super BlockPos> predicate) {
+         this.positions = Iterables.filter(this.positions, predicate::test);
+         return this;
+@@ -32,6 +91,10 @@ public class OrderedBlockMatcher extends BlockMatcher {
+ 
+     @Override
+     public boolean atLeastMatched(final int n) {
++        if (this.cannotMatch(this.statePredicate)) {
++            return false;
++        }
++
+         return BlockScanUtils.findBlocksWithCache(this.level, this.positions, this.statePredicate, new BlockStateConsumer() {
+             private int count = 0;
+ 
+@@ -44,11 +107,19 @@ public class OrderedBlockMatcher extends BlockMatcher {
+ 
+     @Override
+     protected boolean anyMatched(final Predicate<BlockState> statePredicate) {
++        if (this.cannotMatch(statePredicate)) {
++            return false;
++        }
++
+         return BlockScanUtils.findBlocksWithCache(this.level, this.positions, statePredicate, (var0, var1) -> Continuation.ABORT);
+     }
+ 
+     @Override
+     public void forEach(final BiConsumer<BlockPos, BlockState> consumer) {
++        if (this.cannotMatch(this.statePredicate)) {
++            return;
++        }
++
+         BlockScanUtils.findBlocksWithCache(this.level, this.positions, this.statePredicate, (pos, state) -> {
+             consumer.accept(pos, state);
+             return Continuation.CONTINUE;
+@@ -57,10 +128,18 @@ public class OrderedBlockMatcher extends BlockMatcher {
+ 
+     @Override
+     public boolean forEachUntil(final BlockStateConsumer consumer) {
++        if (this.cannotMatch(this.statePredicate)) {
++            return false;
++        }
++
+         return BlockScanUtils.findBlocksWithCache(this.level, this.positions, this.statePredicate, consumer);
+     }
+ 
+     public Optional<BlockPos> findFirst() {
++        if (this.cannotMatch(this.statePredicate)) {
++            return Optional.empty();
++        }
++
+         MutableObject<Optional<BlockPos>> result = new MutableObject<>(Optional.empty());
+         BlockScanUtils.findBlocksWithCache(this.level, this.positions, this.statePredicate, (pos, var2) -> {
+             result.setValue(Optional.of(pos.immutable()));
+@@ -70,6 +149,10 @@ public class OrderedBlockMatcher extends BlockMatcher {
+     }
+ 
+     public Optional<BlockPos> findFirst(final BiPredicate<BlockPos, BlockState> predicate) {
++        if (this.cannotMatch(this.statePredicate)) {
++            return Optional.empty();
++        }
++
+         MutableObject<Optional<BlockPos>> result = new MutableObject<>(Optional.empty());
+         BlockScanUtils.findBlocksWithCache(this.level, this.positions, this.statePredicate, (pos, state) -> {
+             if (predicate.test(pos, state)) {
