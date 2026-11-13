@@ -1,0 +1,51 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mtbl23 <mbhangal23@gmail.com>
+Date: Fri, 13 Nov 2026 00:34:52 -0500
+Subject: [PATCH] Lab only: clean reseeded world after the settle period
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+
+diff --git a/net/minecraft/server/LabNet.java b/net/minecraft/server/LabNet.java
+index 739ff84b649c074b7cf17c83429d18d8c491282f..41c31c43e8c67da9adb0a9010270163758cb0466 100644
+--- a/net/minecraft/server/LabNet.java
++++ b/net/minecraft/server/LabNet.java
+@@ -103,6 +103,19 @@ public final class LabNet {
+                     phase = 2;
+                 }
+             } else if (phase == 2) {
++                if (server.getTickCount() - startTick == SETTLE) {
++                    // entities that existed before the settle ended got their tracker phase from asynchronous chunk status changes: start from a clean, reseeded world
++                    final List<Entity> doomed = new ArrayList<>();
++                    for (final Entity e : level.getAllEntities()) {
++                        if (!(e instanceof ServerPlayer)) {
++                            doomed.add(e);
++                        }
++                    }
++                    for (final Entity e : doomed) {
++                        e.discard(null);
++                    }
++                    seedRandoms(level, 500000);
++                }
+                 for (final Bot b : bots) {
+                     for (final Packet<?> ack : b.pendingAcks) {
+                         send(b, ack);
+@@ -157,13 +170,16 @@ public final class LabNet {
+         }
+     }
+ 
+-    private static void startRun(final MinecraftServer server, final ServerLevel level) throws Exception {
+-        // seed everything the simulation draws from
++    private static void seedRandoms(final ServerLevel level, final int counterBase) throws Exception {
+         level.getRandom().setSeed(SEED * 7919L + 13);
+         Entity.SHARED_RANDOM = new net.minecraft.world.level.levelgen.LegacyRandomSource(SEED * 104729L + 7);
+         final Field ctr = ServerLevel.class.getDeclaredField("ENTITY_COUNTER");
+         ctr.setAccessible(true);
+-        ((AtomicInteger) ctr.get(null)).set(100000);
++        ((AtomicInteger) ctr.get(null)).set(counterBase);
++    }
++
++    private static void startRun(final MinecraftServer server, final ServerLevel level) throws Exception {
++        seedRandoms(level, 100000);
+         final org.bukkit.World world = level.getWorld();
+         world.setFullTime(18000L);
+         world.setGameRule(org.bukkit.GameRules.ADVANCE_TIME, false);

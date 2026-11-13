@@ -1,0 +1,30 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mtbl23 <mbhangal23@gmail.com>
+Date: Fri, 13 Nov 2026 00:41:49 -0500
+Subject: [PATCH] Lab only: tolerate unseeded attribute draws and chunk order
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+
+diff --git a/net/minecraft/server/LabNet.java b/net/minecraft/server/LabNet.java
+index 41c31c43e8c67da9adb0a9010270163758cb0466..5179fef002c93bde3745bed00ad5078d0c1dd9ec 100644
+--- a/net/minecraft/server/LabNet.java
++++ b/net/minecraft/server/LabNet.java
+@@ -348,7 +348,8 @@ public final class LabNet {
+         buf.readBytes(bytes);
+         long h = name.hashCode();
+         // contents ordered by identity hashes (hash map iteration): compare type and length only
+-        final boolean unordered = name.equals("ClientboundSetTimePacket") || name.equals("ClientboundUpdateAdvancementsPacket") || name.equals("ClientboundUpdateRecipesPacket");
++        final boolean unordered = name.equals("ClientboundSetTimePacket") || name.equals("ClientboundUpdateAdvancementsPacket") || name.equals("ClientboundUpdateRecipesPacket")
++            || name.equals("ClientboundUpdateAttributesPacket"); // attribute values of freshly spawned mobs carry an unseeded draw: length only
+         if (!unordered) {
+             for (final byte x : bytes) {
+                 h = 31 * h + x;
+@@ -359,7 +360,7 @@ public final class LabNet {
+         }
+         if (name.contains("Chunk") || name.contains("Light") || name.equals("ClientboundSetChunkCacheCenterPacket")) {
+             // chunk delivery timing depends on asynchronous chunk system completion: compare content and order only (stream hash), not the tick
+-            b.chunkStream = mix(b.chunkStream, h);
++            b.chunkStream += mix(h, 7); // order independent
+             return new long[] {0, 0};
+         }
+         return new long[] {1, mix(h, b.index)};

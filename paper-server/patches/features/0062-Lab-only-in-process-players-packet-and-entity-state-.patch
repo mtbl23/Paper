@@ -1,0 +1,76 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mtbl23 <mbhangal23@gmail.com>
+Date: Fri, 13 Nov 2026 00:12:53 -0500
+Subject: [PATCH] Lab only: in-process players, packet and entity state
+ hashing, determinism hooks (-Dlab.net, -Dlab.det) - fixes
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+
+diff --git a/net/minecraft/server/LabNet.java b/net/minecraft/server/LabNet.java
+index 696c86621283a774b883d6e24687b4b873018185..1cac4a7d103423d8e4d250fa6f992af0643e9a89 100644
+--- a/net/minecraft/server/LabNet.java
++++ b/net/minecraft/server/LabNet.java
+@@ -50,6 +50,8 @@ public final class LabNet {
+     private static final int TICKS = Integer.getInteger("lab.net.ticks", 2000);
+     private static final int PLAYERS = Integer.getInteger("lab.net.players", 6);
+     private static final int RADIUS = Integer.getInteger("lab.net.radius", 14);
++    private static final double SPREAD = Double.parseDouble(System.getProperty("lab.net.spread", "120"));
++    private static final double MAXR = Double.parseDouble(System.getProperty("lab.net.maxr", "40"));
+ 
+     private static int phase; // 0 init, 1 waiting for stable, 2 running, 3 done
+     private static int stableTicks;
+@@ -131,7 +133,9 @@ public final class LabNet {
+         final double x = b.cx + Math.cos(b.angle) * b.radius;
+         final double z = b.cz + Math.sin(b.angle) * b.radius;
+         final float yaw = (float) Math.toDegrees(b.angle + Math.PI / 2);
+-        b.player.connection.handleMovePlayer(new ServerboundMovePlayerPacket.PosRot(x, b.y, z, yaw, 10.0F, false, false));
++        // the real packet handler validates against the wall clock, so set the position directly
++        b.player.absSnapTo(x, b.y, z, yaw, 10.0F);
++        b.player.connection.resetPosition();
+     }
+ 
+     private static void init(final MinecraftServer server, final ServerLevel level) throws Exception {
+@@ -170,14 +174,15 @@ public final class LabNet {
+             final Connection connection = new Connection(PacketFlow.SERVERBOUND);
+             final EmbeddedChannel ch = new EmbeddedChannel(connection);
+             final Bot b = new Bot(i, p, ch);
+-            b.cx = (rng.nextDouble() - 0.5) * 120;
+-            b.cz = (rng.nextDouble() - 0.5) * 120;
+-            b.radius = 10 + rng.nextDouble() * 40;
++            b.cx = (rng.nextDouble() - 0.5) * SPREAD;
++            b.cz = (rng.nextDouble() - 0.5) * SPREAD;
++            b.radius = 10 + rng.nextDouble() * MAXR;
+             b.angle = rng.nextDouble() * Math.PI * 2;
+             b.speed = (0.2 + rng.nextDouble() * 0.5) / b.radius * (rng.nextBoolean() ? 1 : -1);
+             b.y = level.getHeight(net.minecraft.world.level.levelgen.Heightmap.Types.MOTION_BLOCKING, (int) b.cx, (int) b.cz) + 2;
+-            p.snapTo(b.cx + b.radius, b.y, b.cz, 0.0F, 0.0F);
++            p.snapTo(b.cx + Math.cos(b.angle) * b.radius, b.y, b.cz + Math.sin(b.angle) * b.radius, 0.0F, 0.0F);
+             server.getPlayerList().placeNewPlayer(connection, p, cookie);
++            p.connection.handleAcceptPlayerLoad(new net.minecraft.network.protocol.game.ServerboundPlayerLoadedPacket());
+             p.setGameMode(GameType.SURVIVAL);
+             p.getAbilities().invulnerable = true;
+             p.getAbilities().mayfly = true;
+@@ -216,7 +221,7 @@ public final class LabNet {
+             ents.sort((a, c) -> Integer.compare(a.getId(), c.getId()));
+             long eh = 0;
+             for (final Entity e : ents) {
+-                long h = mix(e.getId(), e.getType().hashCode() * 31L + e.getType().toString().hashCode());
++                long h = mix(e.getId(), e.getType().toString().hashCode());
+                 h = mix(h, Double.doubleToLongBits(e.getX()));
+                 h = mix(h, Double.doubleToLongBits(e.getY()));
+                 h = mix(h, Double.doubleToLongBits(e.getZ()));
+@@ -310,8 +315,12 @@ public final class LabNet {
+         final byte[] bytes = new byte[buf.readableBytes()];
+         buf.readBytes(bytes);
+         long h = name.hashCode();
+-        for (final byte x : bytes) {
+-            h = 31 * h + x;
++        // contents ordered by identity hashes (hash map iteration): compare type and length only
++        final boolean unordered = name.equals("ClientboundSetTimePacket") || name.equals("ClientboundUpdateAdvancementsPacket") || name.equals("ClientboundUpdateRecipesPacket");
++        if (!unordered) {
++            for (final byte x : bytes) {
++                h = 31 * h + x;
++            }
+         }
+         if (detail) {
+             out.write("D " + rel + " " + b.index + " " + name + " " + bytes.length + " " + Long.toHexString(h) + "\n");

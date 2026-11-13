@@ -1,0 +1,87 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mtbl23 <mbhangal23@gmail.com>
+Date: Fri, 13 Nov 2026 00:46:44 -0500
+Subject: [PATCH] Lab only: attribute values in the state hash, attribute
+ packets hashed by value
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+
+diff --git a/net/minecraft/server/LabNet.java b/net/minecraft/server/LabNet.java
+index 5179fef002c93bde3745bed00ad5078d0c1dd9ec..0900e5f5d4cffb4a4f95c108b73bf71c17dbd6b9 100644
+--- a/net/minecraft/server/LabNet.java
++++ b/net/minecraft/server/LabNet.java
+@@ -256,6 +256,7 @@ public final class LabNet {
+                 h = mix(h, e.getRemainingFireTicks() * 5L + (e.onGround() ? 1 : 0) + e.tickCount * 7L);
+                 if (e instanceof LivingEntity le) {
+                     h = mix(h, Float.floatToIntBits(le.getHealth()));
++                    h = mix(h, attributeHash(le));
+                 }
+                 if (detail) {
+                     out.write("E " + rel + " " + e.getId() + " " + e.getType() + " " + e.getX() + "," + e.getY() + "," + e.getZ() + " " + Long.toHexString(h) + "\n");
+@@ -288,6 +289,34 @@ public final class LabNet {
+         }
+     }
+ 
++    /** Order independent hash of every attribute: key, base value, current value and every modifier (id, amount, operation). */
++    private static long attributeHash(final LivingEntity le) {
++        long total = 0;
++        for (final net.minecraft.world.entity.ai.attributes.AttributeInstance a : le.getAttributes().getSyncableAttributes()) {
++            long h = a.getAttribute().getRegisteredName().hashCode();
++            h = mix(h, Double.doubleToLongBits(a.getBaseValue()));
++            h = mix(h, Double.doubleToLongBits(a.getValue()));
++            long m = 0;
++            for (final net.minecraft.world.entity.ai.attributes.AttributeModifier mod : a.getModifiers()) {
++                m += mix(mix(mod.id().toString().hashCode(), Double.doubleToLongBits(mod.amount())), mod.operation().ordinal());
++            }
++            total += mix(h, m);
++        }
++        return total;
++    }
++
++    private static String attrText(final net.minecraft.network.protocol.game.ClientboundUpdateAttributesPacket u) {
++        final StringBuilder sb = new StringBuilder();
++        for (final var s : u.getValues()) {
++            sb.append(s.attribute().getRegisteredName()).append('=').append(s.base());
++            for (final var mod : s.modifiers()) {
++                sb.append('{').append(mod.id()).append(':').append(mod.amount()).append(':').append(mod.operation()).append('}');
++            }
++            sb.append(';');
++        }
++        return sb.toString();
++    }
++
+     private static long blockHash(final ServerLevel level) {
+         long h = 0;
+         for (int cx = -6; cx <= 6; cx++) {
+@@ -348,15 +377,27 @@ public final class LabNet {
+         buf.readBytes(bytes);
+         long h = name.hashCode();
+         // contents ordered by identity hashes (hash map iteration): compare type and length only
+-        final boolean unordered = name.equals("ClientboundSetTimePacket") || name.equals("ClientboundUpdateAdvancementsPacket") || name.equals("ClientboundUpdateRecipesPacket")
+-            || name.equals("ClientboundUpdateAttributesPacket"); // attribute values of freshly spawned mobs carry an unseeded draw: length only
+-        if (!unordered) {
++        final boolean unordered = name.equals("ClientboundSetTimePacket") || name.equals("ClientboundUpdateAdvancementsPacket") || name.equals("ClientboundUpdateRecipesPacket");
++        if (packet instanceof net.minecraft.network.protocol.game.ClientboundUpdateAttributesPacket ua) {
++            // the attribute list comes out of a hash set (identity hash order, client invisible): hash the full values order independently
++            long sum = ua.getEntityId();
++            for (final var s : ua.getValues()) {
++                long e = s.attribute().getRegisteredName().hashCode();
++                e = mix(e, Double.doubleToLongBits(s.base()));
++                long m = 0;
++                for (final var mod : s.modifiers()) {
++                    m += mix(mix(mod.id().toString().hashCode(), Double.doubleToLongBits(mod.amount())), mod.operation().ordinal());
++                }
++                sum += mix(e, m);
++            }
++            h = mix(h, sum);
++        } else if (!unordered) {
+             for (final byte x : bytes) {
+                 h = 31 * h + x;
+             }
+         }
+         if (detail) {
+-            out.write("D " + rel + " " + b.index + " " + name + " " + bytes.length + " " + Long.toHexString(h) + (packet instanceof net.minecraft.network.protocol.game.ClientboundLevelChunkWithLightPacket c ? " " + c.x() + "," + c.z() : "") + "\n");
++            out.write("D " + rel + " " + b.index + " " + name + " " + bytes.length + " " + Long.toHexString(h) + (packet instanceof net.minecraft.network.protocol.game.ClientboundLevelChunkWithLightPacket c ? " " + c.x() + "," + c.z() : packet instanceof net.minecraft.network.protocol.game.ClientboundUpdateAttributesPacket u ? " e" + u.getEntityId() + " " + attrText(u) : "") + "\n");
+         }
+         if (name.contains("Chunk") || name.contains("Light") || name.equals("ClientboundSetChunkCacheCenterPacket")) {
+             // chunk delivery timing depends on asynchronous chunk system completion: compare content and order only (stream hash), not the tick

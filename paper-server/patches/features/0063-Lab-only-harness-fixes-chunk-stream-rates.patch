@@ -1,0 +1,45 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mtbl23 <mbhangal23@gmail.com>
+Date: Fri, 13 Nov 2026 00:22:12 -0500
+Subject: [PATCH] Lab only: harness fixes (chunk stream, rates)
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+
+diff --git a/net/minecraft/server/LabNet.java b/net/minecraft/server/LabNet.java
+index 1cac4a7d103423d8e4d250fa6f992af0643e9a89..3f17f3a25e1063c5a59afc31531b653e57935aaf 100644
+--- a/net/minecraft/server/LabNet.java
++++ b/net/minecraft/server/LabNet.java
+@@ -70,6 +70,7 @@ public final class LabNet {
+         final EmbeddedChannel channel;
+         final List<Packet<?>> pendingAcks = new ArrayList<>();
+         boolean awaiting;
++        long chunkStream;
+         double cx, cz, radius, angle, speed, y;
+ 
+         Bot(final int index, final ServerPlayer player, final EmbeddedChannel channel) {
+@@ -240,6 +241,11 @@ public final class LabNet {
+             }
+             out.write("T " + rel + " E " + ents.size() + " " + Long.toHexString(eh) + " P " + pc + " " + Long.toHexString(ph) + "\n");
+             if (rel % 200 == 0) {
++                long cs = 0;
++                for (final Bot b : bots) {
++                    cs = mix(cs, b.chunkStream);
++                }
++                out.write("C " + rel + " " + Long.toHexString(cs) + "\n");
+                 out.write("B " + rel + " " + Long.toHexString(blockHash(level)) + "\n");
+             }
+             if ((rel & 63) == 0) {
+@@ -323,7 +329,12 @@ public final class LabNet {
+             }
+         }
+         if (detail) {
+-            out.write("D " + rel + " " + b.index + " " + name + " " + bytes.length + " " + Long.toHexString(h) + "\n");
++            out.write("D " + rel + " " + b.index + " " + name + " " + bytes.length + " " + Long.toHexString(h) + (packet instanceof net.minecraft.network.protocol.game.ClientboundLevelChunkWithLightPacket c ? " " + c.x() + "," + c.z() : "") + "\n");
++        }
++        if (name.contains("Chunk") || name.contains("Light") || name.equals("ClientboundSetChunkCacheCenterPacket")) {
++            // chunk delivery timing depends on asynchronous chunk system completion: compare content and order only (stream hash), not the tick
++            b.chunkStream = mix(b.chunkStream, h);
++            return new long[] {0, 0};
+         }
+         return new long[] {1, mix(h, b.index)};
+     }

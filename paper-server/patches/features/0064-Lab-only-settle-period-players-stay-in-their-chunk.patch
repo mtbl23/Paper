@@ -1,0 +1,51 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mtbl23 <mbhangal23@gmail.com>
+Date: Fri, 13 Nov 2026 00:27:53 -0500
+Subject: [PATCH] Lab only: settle period, players stay in their chunk
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+
+diff --git a/net/minecraft/server/LabNet.java b/net/minecraft/server/LabNet.java
+index 3f17f3a25e1063c5a59afc31531b653e57935aaf..739ff84b649c074b7cf17c83429d18d8c491282f 100644
+--- a/net/minecraft/server/LabNet.java
++++ b/net/minecraft/server/LabNet.java
+@@ -50,6 +50,8 @@ public final class LabNet {
+     private static final int TICKS = Integer.getInteger("lab.net.ticks", 2000);
+     private static final int PLAYERS = Integer.getInteger("lab.net.players", 6);
+     private static final int RADIUS = Integer.getInteger("lab.net.radius", 14);
++    private static final int SETTLE = Integer.getInteger("lab.net.settle", 300);
++    private static final boolean STAY = !Boolean.getBoolean("lab.net.roam");
+     private static final double SPREAD = Double.parseDouble(System.getProperty("lab.net.spread", "120"));
+     private static final double MAXR = Double.parseDouble(System.getProperty("lab.net.maxr", "40"));
+ 
+@@ -180,6 +182,11 @@ public final class LabNet {
+             b.radius = 10 + rng.nextDouble() * MAXR;
+             b.angle = rng.nextDouble() * Math.PI * 2;
+             b.speed = (0.2 + rng.nextDouble() * 0.5) / b.radius * (rng.nextBoolean() ? 1 : -1);
++            if (STAY) {
++                b.cx = Math.floor(b.cx / 16.0) * 16.0 + 8.0;
++                b.cz = Math.floor(b.cz / 16.0) * 16.0 + 8.0;
++                b.radius = 2.0 + rng.nextDouble() * 4.0;
++            }
+             b.y = level.getHeight(net.minecraft.world.level.levelgen.Heightmap.Types.MOTION_BLOCKING, (int) b.cx, (int) b.cz) + 2;
+             p.snapTo(b.cx + Math.cos(b.angle) * b.radius, b.y, b.cz + Math.sin(b.angle) * b.radius, 0.0F, 0.0F);
+             server.getPlayerList().placeNewPlayer(connection, p, cookie);
+@@ -199,7 +206,7 @@ public final class LabNet {
+         if (phase != 2) {
+             return;
+         }
+-        final int rel = server.getTickCount() - startTick;
++        final int rel = server.getTickCount() - startTick - SETTLE;
+         try {
+             final boolean detail = rel >= detailFrom && rel <= detailTo;
+             long ph = 0;
+@@ -239,6 +246,9 @@ public final class LabNet {
+                 }
+                 eh = mix(eh, h);
+             }
++            if (rel < 0) {
++                return;
++            }
+             out.write("T " + rel + " E " + ents.size() + " " + Long.toHexString(eh) + " P " + pc + " " + Long.toHexString(ph) + "\n");
+             if (rel % 200 == 0) {
+                 long cs = 0;

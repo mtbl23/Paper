@@ -1,0 +1,70 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mtbl23 <mbhangal23@gmail.com>
+Date: Fri, 13 Nov 2026 00:57:51 -0500
+Subject: [PATCH] Lab only: canonical heightmap order for chunk packet hashing
+
+
+diff --git a/net/minecraft/server/LabNet.java b/net/minecraft/server/LabNet.java
+index 0900e5f5d4cffb4a4f95c108b73bf71c17dbd6b9..6cbcae53957f8036ea4469e16ef6a02d4a44928c 100644
+--- a/net/minecraft/server/LabNet.java
++++ b/net/minecraft/server/LabNet.java
+@@ -45,6 +45,7 @@ import net.minecraft.world.level.block.Block;
+  * lab.net.spawn=true to let monsters spawn naturally (night is forced).
+  */
+ public final class LabNet {
++    private static final boolean HEXCHUNK = Boolean.getBoolean("lab.net.hexchunk");
+     public static final boolean ON = System.getProperty("lab.net") != null;
+     private static final long SEED = Long.getLong("lab.net.seed", 1L);
+     private static final int TICKS = Integer.getInteger("lab.net.ticks", 2000);
+@@ -375,6 +376,9 @@ public final class LabNet {
+         ((ProtocolInfo) info).codec().encode(buf, packet);
+         final byte[] bytes = new byte[buf.readableBytes()];
+         buf.readBytes(bytes);
++        if (packet instanceof net.minecraft.network.protocol.game.ClientboundLevelChunkWithLightPacket) {
++            canonHeightmaps(bytes);
++        }
+         long h = name.hashCode();
+         // contents ordered by identity hashes (hash map iteration): compare type and length only
+         final boolean unordered = name.equals("ClientboundSetTimePacket") || name.equals("ClientboundUpdateAdvancementsPacket") || name.equals("ClientboundUpdateRecipesPacket");
+@@ -396,6 +400,13 @@ public final class LabNet {
+                 h = 31 * h + x;
+             }
+         }
++        if (detail && HEXCHUNK && packet instanceof net.minecraft.network.protocol.game.ClientboundLevelChunkWithLightPacket hc && hc.x() == 0 && hc.z() == 0 && b.index == 0) {
++            final StringBuilder sb = new StringBuilder("H ");
++            for (final byte x : bytes) {
++                sb.append(String.format("%02x", x));
++            }
++            out.write(sb + "\n");
++        }
+         if (detail) {
+             out.write("D " + rel + " " + b.index + " " + name + " " + bytes.length + " " + Long.toHexString(h) + (packet instanceof net.minecraft.network.protocol.game.ClientboundLevelChunkWithLightPacket c ? " " + c.x() + "," + c.z() : packet instanceof net.minecraft.network.protocol.game.ClientboundUpdateAttributesPacket u ? " e" + u.getEntityId() + " " + attrText(u) : "") + "\n");
+         }
+@@ -406,4 +417,27 @@ public final class LabNet {
+         }
+         return new long[] {1, mix(h, b.index)};
+     }
++
++    /**
++     * The heightmap map in a chunk packet is written in enum-identity HashMap order, which varies between JVM runs (vanilla
++     * nondeterminism, no client-visible meaning). Rewrite the entries sorted by key in place; every byte of every entry still counts.
++     */
++    private static void canonHeightmaps(final byte[] b) {
++        int p = 1 + 8; // packet id (1 byte varint) + x + z
++        final int n = b[p++];
++        final int start = p;
++        final java.util.TreeMap<Integer, byte[]> entries = new java.util.TreeMap<>();
++        for (int i = 0; i < n; i++) {
++            final int entryStart = p;
++            final int key = b[p++];
++            final int len = b[p++]; // longs count < 128 here
++            p += len * 8;
++            entries.put(key, java.util.Arrays.copyOfRange(b, entryStart, p));
++        }
++        int q = start;
++        for (final byte[] e : entries.values()) {
++            System.arraycopy(e, 0, b, q, e.length);
++            q += e.length;
++        }
++    }
+ }

@@ -1,0 +1,127 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mtbl23 <mbhangal23@gmail.com>
+Date: Fri, 13 Nov 2026 01:09:15 -0500
+Subject: [PATCH] Chunk ticking: cheaper spawn-state counting, thunder early
+ exit, indexed environment attribute layers, loaded-chunk structure fast path
+
+
+diff --git a/net/minecraft/server/level/ServerChunkCache.java b/net/minecraft/server/level/ServerChunkCache.java
+index 09bffd36110c5028da5b13e4edbd39d238a7dc02..e568df39ed1535ff2fe21e5e0eee9cca597f36e4 100644
+--- a/net/minecraft/server/level/ServerChunkCache.java
++++ b/net/minecraft/server/level/ServerChunkCache.java
+@@ -577,9 +577,9 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
+                 }
+                 // Paper end - per player mob spawning backoff
+             }
+-            spawnCookie = NaturalSpawner.createState(chunkCount, this.level, this::getFullChunk, null, true);
++            spawnCookie = NaturalSpawner.createState(chunkCount, this.level, this.fullChunkGetter, null, true);
+         } else {
+-            spawnCookie = NaturalSpawner.createState(chunkCount, this.level, this::getFullChunk, !this.level.paperConfig().entities.spawning.perPlayerMobSpawns ? new LocalMobCapCalculator(this.chunkMap) : null, false);
++            spawnCookie = NaturalSpawner.createState(chunkCount, this.level, this.fullChunkGetter, !this.level.paperConfig().entities.spawning.perPlayerMobSpawns ? new LocalMobCapCalculator(this.chunkMap) : null, false);
+         }
+         // Paper end - Optional per player mob spawns
+         this.lastSpawnState = spawnCookie;
+@@ -655,6 +655,18 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
+         }
+     }
+ 
++    private final NaturalSpawner.ChunkGetter fullChunkGetter = new NaturalSpawner.ChunkGetter() {
++        @Override
++        public void query(final long chunkKey, final Consumer<LevelChunk> output) {
++            ServerChunkCache.this.getFullChunk(chunkKey, output);
++        }
++
++        @Override
++        public LevelChunk get(final long chunkKey) {
++            return ServerChunkCache.this.fullChunks.get(chunkKey);
++        }
++    };
++
+     private void getFullChunk(final long chunkKey, final Consumer<LevelChunk> output) {
+         // Paper start - rewrite chunk system
+         // note: bypass currentlyLoaded from getChunkNow
+diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
+index 98bf90ad1abe475dd3c118eac0c976e040d96231..7803913bf13c5fe2dadaa92544e8e8cef8f762a7 100644
+--- a/net/minecraft/server/level/ServerLevel.java
++++ b/net/minecraft/server/level/ServerLevel.java
+@@ -1056,6 +1056,10 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+     }
+ 
+     public void tickThunder(final LevelChunk chunk) {
++        // Chunk tick rework: the thunder strike needs rain (same condition, checked first), most ticks stop here
++        if (!this.isRaining()) {
++            return;
++        }
+         ChunkPos chunkPos = chunk.getPos();
+         boolean raining = this.isRaining();
+         int minX = chunkPos.getMinBlockX();
+diff --git a/net/minecraft/world/attribute/EnvironmentAttributeSystem.java b/net/minecraft/world/attribute/EnvironmentAttributeSystem.java
+index 6dd84328feba6164182ce871d17d7389936224e1..23beb4de00f41dc0aeb63ff68df29dabbfc5bc2e 100644
+--- a/net/minecraft/world/attribute/EnvironmentAttributeSystem.java
++++ b/net/minecraft/world/attribute/EnvironmentAttributeSystem.java
+@@ -321,7 +321,9 @@ public class EnvironmentAttributeSystem implements EnvironmentAttributeReader {
+         private Value computeValuePositional(final Vec3 pos, final @Nullable SpatialAttributeInterpolator biomeInterpolator) {
+             Value result = this.baseValue;
+ 
+-            for (EnvironmentAttributeLayer<Value> layer : this.layers) {
++            final List<EnvironmentAttributeLayer<Value>> layerList = this.layers; // Chunk tick rework: indexed loop, no iterator
++            for (int layerIndex = 0, layerCount = layerList.size(); layerIndex < layerCount; layerIndex++) {
++                final EnvironmentAttributeLayer<Value> layer = layerList.get(layerIndex);
+                 result = (Value)(switch (layer) {
+                     case EnvironmentAttributeLayer.Constant<Value> constantLayer -> constantLayer.applyConstant(result);
+                     case EnvironmentAttributeLayer.TimeBased<Value> timeBasedLayer -> timeBasedLayer.applyTimeBased(result, this.cacheTickId);
+diff --git a/net/minecraft/world/level/NaturalSpawner.java b/net/minecraft/world/level/NaturalSpawner.java
+index c5c2fffa1ea45d25a77fab8c86b88015c7b8d753..a4657e6e08a5b19dfeb565c5d528dd20726f2ae5 100644
+--- a/net/minecraft/world/level/NaturalSpawner.java
++++ b/net/minecraft/world/level/NaturalSpawner.java
+@@ -96,7 +96,8 @@ public final class NaturalSpawner {
+                     }
+                     // Paper end - Only count natural spawns
+                     BlockPos pos = entity.blockPosition();
+-                    chunkGetter.query(ChunkPos.pack(pos), chunk -> {
++                    final LevelChunk chunk = chunkGetter.get(ChunkPos.pack(pos));
++                    if (chunk != null) {
+                         MobSpawnSettings.MobSpawnCost mobSpawnCost = getNaturalMobSpawnCost(level, pos, entity.getType()); // Leaf port - skip biome lookup for types without a cost
+                         if (mobSpawnCost != null) {
+                             spawnPotential.addCharge(entity.blockPosition(), mobSpawnCost.charge());
+@@ -112,7 +113,7 @@ public final class NaturalSpawner {
+                             ((ServerLevel) chunk.getLevel()).getChunkSource().chunkMap.updatePlayerMobTypeMap(entity);
+                         }
+                         // Paper end - Optional per player mob spawns
+-                    });
++                    }
+                 }
+             }
+         }
+@@ -628,6 +629,13 @@ public final class NaturalSpawner {
+     @FunctionalInterface
+     public interface ChunkGetter {
+         void query(final long chunkKey, Consumer<LevelChunk> output);
++
++        // Chunk tick rework: direct lookup so callers on the hot path need no capturing lambda; implementations override this
++        default @Nullable LevelChunk get(final long chunkKey) {
++            final LevelChunk[] holder = new LevelChunk[1];
++            this.query(chunkKey, chunk -> holder[0] = chunk);
++            return holder[0];
++        }
+     }
+ 
+     @FunctionalInterface
+diff --git a/net/minecraft/world/level/StructureManager.java b/net/minecraft/world/level/StructureManager.java
+index e355f7c04aefed172776edfccc584f112808e3d7..ea38b5d3dc1b08563193be9b0db89408fb8d4a7c 100644
+--- a/net/minecraft/world/level/StructureManager.java
++++ b/net/minecraft/world/level/StructureManager.java
+@@ -201,6 +201,13 @@ public class StructureManager {
+     public Map<Structure, LongSet> getAllStructuresAt(final int x, final int y, final int z) {
+         int sectionX = SectionPos.blockToSectionCoord(x);
+         int sectionZ = SectionPos.blockToSectionCoord(z);
++        // Chunk tick rework: a loaded full chunk is the chunk getChunk(..., STRUCTURE_REFERENCES) would return, skip the generic path
++        if (this.level instanceof net.minecraft.server.level.ServerLevel serverLevel) {
++            final net.minecraft.world.level.chunk.LevelChunk loaded = serverLevel.getChunkSource().getChunkAtIfLoadedImmediately(sectionX, sectionZ);
++            if (loaded != null) {
++                return loaded.getAllReferences();
++            }
++        }
+         return this.level.getChunk(sectionX, sectionZ, ChunkStatus.STRUCTURE_REFERENCES).getAllReferences();
+     }
+ 
