@@ -1,0 +1,107 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mtbl23 <mbhangal23@gmail.com>
+Date: Thu, 12 Nov 2026 18:09:37 -0500
+Subject: [PATCH] Leaf port: read the query box once in entity slice queries
+
+ChunkEntitySlices#getEntities and #getEntitiesLimited called
+AABB#intersects(AABB) per candidate entity, re-reading the query box fields
+each time. The six query fields are now read once per call and compared with
+the same strict comparisons (so the answer is identical, NaN included).
+LivingEntity#isAlive checks the plain `dead` flag first; the three tests have
+no side effects so the result is unchanged.
+
+Adapted from Leaf "Optimise getEntities" by Taiyou06 <kaandindar21@gmail.com>,
+co-authored by Martijn Muijsers <martijnmuijsers@live.nl> (MIT).
+Leaf: https://github.com/Winds-Studio/Leaf
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+
+diff --git a/ca/spottedleaf/moonrise/patches/chunk_system/level/entity/ChunkEntitySlices.java b/ca/spottedleaf/moonrise/patches/chunk_system/level/entity/ChunkEntitySlices.java
+index 2b29b3593ae8f355803122381b9e42ed0cf1914b..8f6c72dcb087e83297bdfe44c51183993be5f5a5 100644
+--- a/ca/spottedleaf/moonrise/patches/chunk_system/level/entity/ChunkEntitySlices.java
++++ b/ca/spottedleaf/moonrise/patches/chunk_system/level/entity/ChunkEntitySlices.java
+@@ -532,6 +532,15 @@ public final class ChunkEntitySlices {
+ 
+             final BasicEntityList<Entity>[] entitiesBySection = this.entitiesBySection;
+ 
++            // Leaf port start - read the query box once instead of per entity (Leaf "Optimise getEntities", Taiyou06, Martijn Muijsers; MIT)
++            final double boxMinX = box.minX;
++            final double boxMinY = box.minY;
++            final double boxMinZ = box.minZ;
++            final double boxMaxX = box.maxX;
++            final double boxMaxY = box.maxY;
++            final double boxMaxZ = box.maxZ;
++            // Leaf port end
++
+             for (int section = min; section <= max; ++section) {
+                 final BasicEntityList<Entity> list = entitiesBySection[section - minSection];
+ 
+@@ -544,9 +553,18 @@ public final class ChunkEntitySlices {
+                 for (int i = 0, len = Math.min(storage.length, list.size()); i < len; ++i) {
+                     final Entity entity = storage[i];
+ 
+-                    if (entity == null || entity == except || !entity.getBoundingBox().intersects(box)) {
++                    if (entity == null || entity == except) {
++                        continue;
++                    }
++
++                    // Leaf port start - AABB#intersects(AABB) inlined against the cached box, same comparisons (so the same answer for NaN)
++                    final AABB entityBox = entity.getBoundingBox();
++                    if (!(entityBox.minX < boxMaxX && entityBox.maxX > boxMinX
++                        && entityBox.minY < boxMaxY && entityBox.maxY > boxMinY
++                        && entityBox.minZ < boxMaxZ && entityBox.maxZ > boxMinZ)) {
+                         continue;
+                     }
++                    // Leaf port end
+ 
+                     if (predicate != null && !predicate.test(entity)) {
+                         continue;
+@@ -572,6 +590,15 @@ public final class ChunkEntitySlices {
+ 
+             final BasicEntityList<Entity>[] entitiesBySection = this.entitiesBySection;
+ 
++            // Leaf port start - read the query box once instead of per entity (Leaf "Optimise getEntities", Taiyou06, Martijn Muijsers; MIT)
++            final double boxMinX = box.minX;
++            final double boxMinY = box.minY;
++            final double boxMinZ = box.minZ;
++            final double boxMaxX = box.maxX;
++            final double boxMaxY = box.maxY;
++            final double boxMaxZ = box.maxZ;
++            // Leaf port end
++
+             for (int section = min; section <= max; ++section) {
+                 final BasicEntityList<Entity> list = entitiesBySection[section - minSection];
+ 
+@@ -584,9 +611,18 @@ public final class ChunkEntitySlices {
+                 for (int i = 0, len = Math.min(storage.length, list.size()); i < len; ++i) {
+                     final Entity entity = storage[i];
+ 
+-                    if (entity == null || entity == except || !entity.getBoundingBox().intersects(box)) {
++                    if (entity == null || entity == except) {
++                        continue;
++                    }
++
++                    // Leaf port start - AABB#intersects(AABB) inlined against the cached box, same comparisons (so the same answer for NaN)
++                    final AABB entityBox = entity.getBoundingBox();
++                    if (!(entityBox.minX < boxMaxX && entityBox.maxX > boxMinX
++                        && entityBox.minY < boxMaxY && entityBox.maxY > boxMinY
++                        && entityBox.minZ < boxMaxZ && entityBox.maxZ > boxMinZ)) {
+                         continue;
+                     }
++                    // Leaf port end
+ 
+                     if (predicate != null && !predicate.test(entity)) {
+                         continue;
+diff --git a/net/minecraft/world/entity/LivingEntity.java b/net/minecraft/world/entity/LivingEntity.java
+index 59cac2f3b12d1d6ab5a715ceff01774bf54b3506..249474689fc6be9e266242e538766ab3a94beab1 100644
+--- a/net/minecraft/world/entity/LivingEntity.java
++++ b/net/minecraft/world/entity/LivingEntity.java
+@@ -2203,7 +2203,7 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+ 
+     @Override
+     public boolean isAlive() {
+-        return !this.isRemoved() && this.getHealth() > 0.0F && !this.dead; // Paper - Check this.dead
++        return !this.dead && !this.isRemoved() && this.getHealth() > 0.0F; // Paper - Check this.dead // Leaf port - cheapest check first, no side effects (Leaf "Optimise getEntities"; MIT)
+     }
+ 
+     public boolean isLookingAtMe(

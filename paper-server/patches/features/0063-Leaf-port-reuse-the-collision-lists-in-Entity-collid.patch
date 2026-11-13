@@ -1,0 +1,74 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mtbl23 <mbhangal23@gmail.com>
+Date: Thu, 12 Nov 2026 18:12:08 -0500
+Subject: [PATCH] Leaf port: reuse the collision lists in Entity#collide
+
+Entity#collide allocated three ArrayLists for every movement of every entity.
+On the server thread they now come from static scratch lists that are cleared
+after each call; a re-entrant call or a call from another thread allocates
+fresh lists as before.
+
+Adapted from Leaf "cache collision list" by hayanesuru <hayanesuru@outlook.jp> (MIT).
+Leaf: https://github.com/Winds-Studio/Leaf
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+
+diff --git a/net/minecraft/world/entity/Entity.java b/net/minecraft/world/entity/Entity.java
+index 8ef292ee310fdd244daf080c2548b676fe0bf160..9276c4ed78442a3cb6f9018655249dc31091b0d2 100644
+--- a/net/minecraft/world/entity/Entity.java
++++ b/net/minecraft/world/entity/Entity.java
+@@ -1665,9 +1665,44 @@ public abstract class Entity
+ 
+         final AABB currentBox = this.getBoundingBox();
+ 
+-        final List<VoxelShape> potentialCollisionsVoxel = new ArrayList<>();
+-        final List<AABB> potentialCollisionsBB = new ArrayList<>();
++        // Leaf port start - reuse the three collision lists across calls instead of allocating them per move (Leaf "cache collision list", hayanesuru; MIT)
++        // Only the thread that owns the scratch lists may use them, and only one collide() at a time: anything else allocates as before.
++        final boolean useScratch = !collideScratchInUse && Thread.currentThread() == net.minecraft.server.MinecraftServer.getServer().getRunningThread();
++        final List<VoxelShape> potentialCollisionsVoxel;
++        final List<AABB> potentialCollisionsBB;
++        final List<AABB> entityAABBs;
++        if (useScratch) {
++            collideScratchInUse = true;
++            potentialCollisionsVoxel = COLLIDE_SCRATCH_VOXEL;
++            potentialCollisionsBB = COLLIDE_SCRATCH_BB;
++            entityAABBs = COLLIDE_SCRATCH_ENTITY_BB;
++        } else {
++            potentialCollisionsVoxel = new ArrayList<>();
++            potentialCollisionsBB = new ArrayList<>();
++            entityAABBs = new ArrayList<>();
++        }
++        try {
++            return this.collideWith(movement, currentBox, xZero, zZero, potentialCollisionsVoxel, potentialCollisionsBB, entityAABBs);
++        } finally {
++            if (useScratch) {
++                COLLIDE_SCRATCH_VOXEL.clear();
++                COLLIDE_SCRATCH_BB.clear();
++                COLLIDE_SCRATCH_ENTITY_BB.clear();
++                collideScratchInUse = false;
++            }
++        }
++    }
++
++    private static final List<VoxelShape> COLLIDE_SCRATCH_VOXEL = new ArrayList<>();
++    private static final List<AABB> COLLIDE_SCRATCH_BB = new ArrayList<>();
++    private static final List<AABB> COLLIDE_SCRATCH_ENTITY_BB = new ArrayList<>();
++    private static boolean collideScratchInUse;
+ 
++    private Vec3 collideWith(
++        final Vec3 movement, final AABB currentBox, final boolean xZero, final boolean zZero,
++        final List<VoxelShape> potentialCollisionsVoxel, final List<AABB> potentialCollisionsBB, final List<AABB> entityAABBs
++    ) {
++        // Leaf port end
+         final AABB initialCollisionBox;
+         if (xZero & zZero) {
+             // note: xZero & zZero -> collision on x/z == 0 -> no step height calculation
+@@ -1678,7 +1713,6 @@ public abstract class Entity
+             initialCollisionBox = currentBox.expandTowards(movement);
+         }
+ 
+-        final List<AABB> entityAABBs = new ArrayList<>();
+         // Vanilla expands the entity query by maxUpStep: the step logic below tests raised positions, so
+         // entities fully above this entity's hitbox must be fetched for those checks (MC-310289). When
+         // there is no horizontal movement the step logic cannot run, so keep the smaller query.
