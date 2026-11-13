@@ -27,3 +27,19 @@ prominent legal notice accompanying the corresponding source: Original patch by 
 
 Each change is its own feature patch in `paper-server/patches/features/` named `Leaf port: ...`;
 the patch message holds the Leaf source reference and the author credits.
+
+### Entity ticking port (branch `lab/entity-port`, patches 0060-0064)
+
+All five are bit identical to vanilla (same results, same order); gameplay changing Leaf options are not ported.
+
+- 0060 read the query box once in `ChunkEntitySlices#getEntities`: Leaf "Optimise getEntities" by Taiyou06,
+  co-authored by Martijn Muijsers (MIT).
+- 0061 cache `Behavior#hasRequiredMemories`: Leaf "Lithium: Reduce Brain memories lookup" by HaHaWTH, based on
+  Lithium by 2No2Name (LGPL-3.0-only). Original patch by HaHaWTH <102713261+HaHaWTH@users.noreply.github.com>.
+- 0062 skip the corner walk in `BlockGetter#forEachBlockIntersectedBetween` when the entity stays in its cells:
+  a narrower rewrite of Leaf "Sakura: Optimise check inside blocks and traverse blocks" (Samsuik, MIT; Leaf
+  additions by HaHaWTH).
+- 0063 reuse the collision lists in `Entity#collide`: Leaf "cache collision list" by hayanesuru (MIT).
+- 0064 skip the planar speed factor multiplication when the factor is exactly 1: Leaf "Skip negligible planar
+  movement multiplication" (Martijn Muijsers, Gale, GPL-3.0-only). Leaf's 1e-6 tolerance variant is not bit
+  identical and is not ported.

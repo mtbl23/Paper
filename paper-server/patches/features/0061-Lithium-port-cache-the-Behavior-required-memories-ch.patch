@@ -1,0 +1,157 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mtbl23 <mbhangal23@gmail.com>
+Date: Thu, 12 Nov 2026 18:12:02 -0500
+Subject: [PATCH] Lithium port: cache the Behavior required-memories check
+ until the memory state changes
+
+Behavior#hasRequiredMemories walked its entry conditions and looked up each
+memory slot on every start attempt of every non-running behavior. The brain now
+counts every change of which memories are registered or hold a value (register,
+a value appearing or disappearing, expiry, clearing) and a Behavior reuses its
+last answer while that count and the brain are unchanged. A value changing while
+staying present does not move the count because the check only tests presence.
+
+Adapted from Leaf "Lithium: Reduce Brain memories lookup" by HaHaWTH, itself
+based on Lithium by 2No2Name (LGPL-3.0-only). Leaf: https://github.com/Winds-Studio/Leaf
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+
+diff --git a/net/minecraft/world/entity/ai/Brain.java b/net/minecraft/world/entity/ai/Brain.java
+index 946ef5b3a72d58a7f9f2cf992436b3611f71be39..d87923b77a899b06bfde5d59f658097c92f2414f 100644
+--- a/net/minecraft/world/entity/ai/Brain.java
++++ b/net/minecraft/world/entity/ai/Brain.java
+@@ -48,6 +48,14 @@ public class Brain<E extends LivingEntity> {
+     private @Nullable BehaviorGroup<E>[] behaviorGroups; // Leaf port - flattened snapshot of availableBehaviorsByPriority, null when it needs to be rebuilt
+     private Activity defaultActivity = Activity.IDLE;
+     private long lastScheduleUpdate = -9999L;
++    // Leaf port start - Lithium "Reduce Brain memories lookup" (2No2Name; LGPL-3.0-only): counts every change of which memories are registered or hold a value, so a
++    // Behavior can reuse its last "required memories are present" answer until this number moves. Values changing while staying present do not count.
++    private long memoryStateVersion = 1L;
++
++    public long memoryStateVersion() {
++        return this.memoryStateVersion;
++    }
++    // Leaf port end
+ 
+     public static <E extends LivingEntity> Brain.Provider<E> provider(final Collection<? extends SensorType<? extends Sensor<? super E>>> sensorTypes) {
+         return new Brain.Provider<>(ImmutableList.of(), sensorTypes, var0 -> List.of());
+@@ -104,6 +112,7 @@ public class Brain<E extends LivingEntity> {
+ 
+     private void registerMemory(final MemoryModuleType<?> memoryType) {
+         this.memories.putIfAbsent(memoryType, MemorySlot.create());
++        this.memoryStateVersion++; // Leaf port
+     }
+ 
+     public Brain() {
+@@ -154,11 +163,16 @@ public class Brain<E extends LivingEntity> {
+ 
+     public void clearMemories() {
+         this.memories.values().forEach(MemorySlot::clear);
++        this.memoryStateVersion++; // Leaf port
+     }
+ 
+     public <U> void eraseMemory(final MemoryModuleType<U> type) {
+         MemorySlot<U> slot = this.getMemorySlotIfPresent(type);
+         if (slot != null) {
++            if (slot.hasValue()) {
++                this.memoryStateVersion++; // Leaf port
++            }
++
+             slot.clear();
+         }
+     }
+@@ -192,8 +206,16 @@ public class Brain<E extends LivingEntity> {
+             }
+ 
+             if (value == null) {
++                if (slot.hasValue()) {
++                    this.memoryStateVersion++; // Leaf port
++                }
++
+                 slot.clear();
+             } else {
++                if (!slot.hasValue()) {
++                    this.memoryStateVersion++; // Leaf port
++                }
++
+                 slot.set(value, tileToLive);
+             }
+         }
+@@ -207,8 +229,16 @@ public class Brain<E extends LivingEntity> {
+             }
+ 
+             if (value == null) {
++                if (slot.hasValue()) {
++                    this.memoryStateVersion++; // Leaf port
++                }
++
+                 slot.clear();
+             } else {
++                if (!slot.hasValue()) {
++                    this.memoryStateVersion++; // Leaf port
++                }
++
+                 slot.set(value);
+             }
+         }
+@@ -424,7 +454,16 @@ public class Brain<E extends LivingEntity> {
+     }
+ 
+     private void forgetOutdatedMemories() {
+-        this.memories.values().forEach(MemorySlot::tick);
++        // Leaf port start - a slot that expires clears its value, which is a state change
++        this.memories.values().forEach(slot -> {
++            if (slot.canExpire()) {
++                slot.tick();
++                if (!slot.hasValue()) {
++                    this.memoryStateVersion++;
++                }
++            }
++        });
++        // Leaf port end
+     }
+ 
+     public void stopAll(final ServerLevel level, final E body) {
+diff --git a/net/minecraft/world/entity/ai/behavior/Behavior.java b/net/minecraft/world/entity/ai/behavior/Behavior.java
+index f78464bcbf82fdc7cbf43c2ee586586b2cdfa552..c77c7c3cbdeecee28c417284a5126f86b5025709 100644
+--- a/net/minecraft/world/entity/ai/behavior/Behavior.java
++++ b/net/minecraft/world/entity/ai/behavior/Behavior.java
+@@ -11,6 +11,9 @@ import net.minecraft.world.entity.ai.memory.MemoryStatus;
+ public abstract class Behavior<E extends LivingEntity> implements BehaviorControl<E> {
+     public static final int DEFAULT_DURATION = 60;
+     protected final Map<MemoryModuleType<?>, MemoryStatus> entryCondition;
++    private net.minecraft.world.entity.ai.@org.jspecify.annotations.Nullable Brain<?> cachedBrain; // Leaf port - see hasRequiredMemories
++    private long cachedMemoryStateVersion;
++    private boolean cachedHasRequiredMemories;
+     private Behavior.Status status = Behavior.Status.STOPPED;
+     private long endTimestamp;
+     private final int minDuration;
+@@ -110,15 +113,25 @@ public abstract class Behavior<E extends LivingEntity> implements BehaviorContro
+     }
+ 
+     protected boolean hasRequiredMemories(final E body) {
++        // Leaf port start - answer from the last check while the brain's memory state is unchanged (Lithium "Reduce Brain memories lookup", 2No2Name; LGPL-3.0-only)
++        final net.minecraft.world.entity.ai.Brain<?> brain = body.getBrain();
++        final long version = brain.memoryStateVersion();
++        if (this.cachedBrain == brain && this.cachedMemoryStateVersion == version) {
++            return this.cachedHasRequiredMemories;
++        }
++
++        this.cachedBrain = brain;
++        this.cachedMemoryStateVersion = version;
++        // Leaf port end
+         for (Entry<MemoryModuleType<?>, MemoryStatus> entry : this.entryCondition.entrySet()) {
+             MemoryModuleType<?> memoryType = entry.getKey();
+             MemoryStatus requiredStatus = entry.getValue();
+-            if (!body.getBrain().checkMemory(memoryType, requiredStatus)) {
+-                return false;
++            if (!brain.checkMemory(memoryType, requiredStatus)) {
++                return this.cachedHasRequiredMemories = false; // Leaf port
+             }
+         }
+ 
+-        return true;
++        return this.cachedHasRequiredMemories = true; // Leaf port
+     }
+ 
+     public enum Status {

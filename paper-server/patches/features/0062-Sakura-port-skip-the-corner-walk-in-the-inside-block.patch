@@ -1,0 +1,85 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mtbl23 <mbhangal23@gmail.com>
+Date: Thu, 12 Nov 2026 18:12:02 -0500
+Subject: [PATCH] Sakura port: skip the corner walk in the inside block scan
+ when the entity stays in its cells
+
+BlockGetter#forEachBlockIntersectedBetween allocated a visited set, ran the
+corner walk and then made a second pass over the target box for every entity
+movement. When the starting and the target box cover the same blocks and the
+corner walk would take no step (same arithmetic as its set-up), every block of
+the second pass is already visited and the walk visits nothing, so only the
+first pass is done. Same blocks, same order, same iteration number.
+
+Narrower rewrite of the idea in Leaf "Sakura: Optimise check inside blocks and
+traverse blocks" (Samsuik, MIT; Leaf additions by HaHaWTH).
+Leaf: https://github.com/Winds-Studio/Leaf
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+
+diff --git a/net/minecraft/world/level/BlockGetter.java b/net/minecraft/world/level/BlockGetter.java
+index 2a4c928281c7e455d6f210aeb599881855d328f8..32c841ca1059c2004da3634044b8dec37e2cfb47 100644
+--- a/net/minecraft/world/level/BlockGetter.java
++++ b/net/minecraft/world/level/BlockGetter.java
+@@ -217,9 +217,27 @@ public interface BlockGetter extends LevelHeightAccessor {
+ 
+             return true;
+         } else {
++            // Leaf port start - most movements stay inside the cells of the starting box (idle and slow mobs): then the
++            // corner walk takes no step and every block of the target box was already visited, so the visited set, the
++            // walk and the second pass can be skipped. Same visits in the same order with the same iteration (Leaf
++            // "Sakura: Optimise check inside blocks and traverse blocks" idea, Samsuik; MIT; this is a narrower rewrite)
++            final AABB aabbAtStart = aabbAtTarget.move(travel.scale(-1.0));
++            if (Mth.floor(aabbAtStart.minX) == Mth.floor(aabbAtTarget.minX) && Mth.floor(aabbAtStart.maxX) == Mth.floor(aabbAtTarget.maxX)
++                && Mth.floor(aabbAtStart.minY) == Mth.floor(aabbAtTarget.minY) && Mth.floor(aabbAtStart.maxY) == Mth.floor(aabbAtTarget.maxY)
++                && Mth.floor(aabbAtStart.minZ) == Mth.floor(aabbAtTarget.minZ) && Mth.floor(aabbAtStart.maxZ) == Mth.floor(aabbAtTarget.maxZ)
++                && travelStaysInStartCells(travel, aabbAtTarget)) {
++                for (BlockPos blockPos : BlockPos.betweenCornersInDirection(aabbAtStart, travel)) {
++                    if (!visitor.visit(blockPos, 0)) {
++                        return false;
++                    }
++                }
++
++                return true;
++            }
++            // Leaf port end
+             LongSet visitedBlocks = new LongOpenHashSet();
+ 
+-            for (BlockPos blockPos : BlockPos.betweenCornersInDirection(aabbAtTarget.move(travel.scale(-1.0)), travel)) {
++            for (BlockPos blockPos : BlockPos.betweenCornersInDirection(aabbAtStart, travel)) {
+                 if (!visitor.visit(blockPos, 0)) {
+                     return false;
+                 }
+@@ -242,6 +260,32 @@ public interface BlockGetter extends LevelHeightAccessor {
+         }
+     }
+ 
++    // Leaf port start - true when addCollisionsAlongTravel's corner walk would not enter its loop (same arithmetic as its set-up)
++    private static boolean travelStaysInStartCells(final Vec3 deltaMove, final AABB aabbAtTarget) {
++        double boxSizeX = aabbAtTarget.getXsize();
++        double boxSizeY = aabbAtTarget.getYsize();
++        double boxSizeZ = aabbAtTarget.getZsize();
++        Vec3i cornerDir = getFurthestCorner(deltaMove);
++        Vec3 toCenter = aabbAtTarget.getCenter();
++        Vec3 toCorner = new Vec3(
++            toCenter.x() + boxSizeX * 0.5 * cornerDir.getX(),
++            toCenter.y() + boxSizeY * 0.5 * cornerDir.getY(),
++            toCenter.z() + boxSizeZ * 0.5 * cornerDir.getZ()
++        );
++        Vec3 fromCorner = toCorner.subtract(deltaMove);
++        int signX = Mth.sign(deltaMove.x);
++        int signY = Mth.sign(deltaMove.y);
++        int signZ = Mth.sign(deltaMove.z);
++        double tDeltaX = signX == 0 ? Double.MAX_VALUE : signX / deltaMove.x;
++        double tDeltaY = signY == 0 ? Double.MAX_VALUE : signY / deltaMove.y;
++        double tDeltaZ = signZ == 0 ? Double.MAX_VALUE : signZ / deltaMove.z;
++        double tX = tDeltaX * (signX > 0 ? 1.0 - Mth.frac(fromCorner.x) : Mth.frac(fromCorner.x));
++        double tY = tDeltaY * (signY > 0 ? 1.0 - Mth.frac(fromCorner.y) : Mth.frac(fromCorner.y));
++        double tZ = tDeltaZ * (signZ > 0 ? 1.0 - Mth.frac(fromCorner.z) : Mth.frac(fromCorner.z));
++        return tX > 1.0 && tY > 1.0 && tZ > 1.0;
++    }
++    // Leaf port end
++
+     private static int addCollisionsAlongTravel(
+         final LongSet visitedBlocks, final Vec3 deltaMove, final AABB aabbAtTarget, final BlockGetter.BlockStepVisitor visitor
+     ) {
