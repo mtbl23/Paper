@@ -1,0 +1,92 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mtbl23 <mbhangal23@gmail.com>
+Date: Mon, 16 Nov 2026 14:29:48 -0500
+Subject: [PATCH] Upkeep tier B: far chunks random tick every N-th tick with N
+ times the speed (off by default)
+
+-Dupkeep.randomTickFarBatch=N (N >= 2): chunks with no player within upkeep.randomTickNearChunks (default 3) chunks are random
+ticked once every N ticks with N times the random tick speed. The expected number of random ticks per block is unchanged; they
+arrive in bursts. Off by default, nothing near a player changes.
+
+diff --git a/net/minecraft/server/UpkeepConfig.java b/net/minecraft/server/UpkeepConfig.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..7ab3555c519a2fda3ab0ba7833bf6172d4f0b7fb
+--- /dev/null
++++ b/net/minecraft/server/UpkeepConfig.java
+@@ -0,0 +1,19 @@
++package net.minecraft.server;
++
++/**
++ * Upkeep tier B switches. Every switch is off by default and read once at startup from a system property, so a server without the
++ * property behaves exactly like the vanilla/Paper tick. They only ever change non-player simulation timing, never what happens
++ * near a player and never player data, damage, loot or worldgen.
++ */
++public final class UpkeepConfig {
++    /**
++     * -Dupkeep.randomTickFarBatch=N (N >= 2): a chunk that has no player within {@link #RANDOM_TICK_NEAR_CHUNKS} chunks is random ticked
++     * only every N-th tick, with N times the random tick speed. The expected number of random ticks per block per second is unchanged,
++     * they just arrive in bursts. 1 (default) is off.
++     */
++    public static final int RANDOM_TICK_FAR_BATCH = Math.max(1, Integer.getInteger("upkeep.randomTickFarBatch", 1));
++    /** -Dupkeep.randomTickNearChunks=R: chunks within R (Chebyshev) of a player always tick every tick. Default 3. */
++    public static final int RANDOM_TICK_NEAR_CHUNKS = Math.max(0, Integer.getInteger("upkeep.randomTickNearChunks", 3));
++
++    private UpkeepConfig() {}
++}
+diff --git a/net/minecraft/server/level/ServerChunkCache.java b/net/minecraft/server/level/ServerChunkCache.java
+index 632703e6913f4c5b7e8aa689b660ee1d2558eb41..0046dcbe0f61bedc87ba5acc5097550e808bcddb 100644
+--- a/net/minecraft/server/level/ServerChunkCache.java
++++ b/net/minecraft/server/level/ServerChunkCache.java
+@@ -174,6 +174,12 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
+         final int size = entityTickingChunks.size();
+ 
+         java.util.Objects.checkFromToIndex(0, size, raw.length);
++        // Upkeep tier B (off by default): far chunks are random ticked every N-th tick with N times the speed, same expected rate
++        final int farBatch = net.minecraft.server.UpkeepConfig.RANDOM_TICK_FAR_BATCH;
++        if (farBatch > 1 && randomTickSpeed > 0) {
++            this.tickChunksWithFarBatching(raw, size, randomTickSpeed, farBatch);
++            return;
++        }
+         for (int i = 0; i < size; ++i) {
+             world.tickChunk(raw[i], randomTickSpeed);
+ 
+@@ -186,6 +192,39 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
+     }
+     // Paper end - chunk tick iteration optimisations
+ 
++    private final it.unimi.dsi.fastutil.longs.LongOpenHashSet upkeepNearChunks = new it.unimi.dsi.fastutil.longs.LongOpenHashSet(); // Upkeep tier B
++
++    private void tickChunksWithFarBatching(final LevelChunk[] raw, final int size, final int randomTickSpeed, final int farBatch) {
++        final ServerLevel world = this.level;
++        final int near = net.minecraft.server.UpkeepConfig.RANDOM_TICK_NEAR_CHUNKS;
++        final it.unimi.dsi.fastutil.longs.LongOpenHashSet nearChunks = this.upkeepNearChunks;
++        nearChunks.clear();
++        for (final ServerPlayer player : world.players()) {
++            final int px = net.minecraft.core.SectionPos.blockToSectionCoord(player.getBlockX());
++            final int pz = net.minecraft.core.SectionPos.blockToSectionCoord(player.getBlockZ());
++            for (int dx = -near; dx <= near; ++dx) {
++                for (int dz = -near; dz <= near; ++dz) {
++                    nearChunks.add(ChunkPos.pack(px + dx, pz + dz));
++                }
++            }
++        }
++        final long phase = world.getGameTime();
++        for (int i = 0; i < size; ++i) {
++            final LevelChunk chunk = raw[i];
++            final ChunkPos pos = chunk.getPos();
++            if (nearChunks.contains(ChunkPos.pack(pos.x(), pos.z()))) {
++                world.tickChunk(chunk, randomTickSpeed);
++            } else if (Math.floorMod(phase + pos.x() * 7L + pos.z() * 13L, (long)farBatch) == 0L) {
++                world.tickChunk(chunk, randomTickSpeed * farBatch);
++            }
++
++            // call mid-tick tasks for chunk system
++            if ((i & 7) == 0) {
++                ((ca.spottedleaf.moonrise.patches.chunk_system.server.ChunkSystemMinecraftServer)this.level.getServer()).moonrise$executeMidTickTasks();
++            }
++        }
++    }
++
+     public ServerChunkCache(
+         final ServerLevel level,
+         final LevelStorageSource.LevelStorageAccess levelStorage,
