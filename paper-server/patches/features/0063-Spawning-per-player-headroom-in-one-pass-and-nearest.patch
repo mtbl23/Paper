@@ -1,0 +1,112 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mtbl23 <182822903+mtbl23@users.noreply.github.com>
+Date: Mon, 16 Nov 2026 14:30:01 -0500
+Subject: [PATCH] Spawning: per player headroom in one pass and nearest player
+ without a predicate (exact)
+
+The per player mob cap headroom of all categories is computed in one pass over
+the nearby players instead of one pass per category (a spawn only changes the
+counts of its own category). The nearest player lookup tests spectators only for
+a player that would become the nearest. Behaviour: identical.
+
+diff --git a/net/minecraft/world/level/NaturalSpawner.java b/net/minecraft/world/level/NaturalSpawner.java
+index 733fedb9405b67e6699c07ba4b81c3b0eb06b100..511477083a26c89a08b646f3a9a559910e450841 100644
+--- a/net/minecraft/world/level/NaturalSpawner.java
++++ b/net/minecraft/world/level/NaturalSpawner.java
+@@ -182,6 +182,9 @@ public final class NaturalSpawner {
+         return spawningCategories;
+     }
+ 
++    private static final int[] HEADROOM_SCRATCH = new int[MobCategory.values().length]; // main thread only
++    private static final int[] LIMIT_SCRATCH = new int[MobCategory.values().length];
++
+     public static void spawnForChunk(
+         final ServerLevel level, final LevelChunk chunk, final NaturalSpawner.SpawnState state, final List<MobCategory> spawningCategories
+     ) {
+@@ -207,7 +210,34 @@ public final class NaturalSpawner {
+         // Spawn rework: categories no attempt from this chunk can succeed in are skipped (off unless entities.spawning.skip-impossible-categories)
+         final int possibleCategories = level.paperConfig().entities.spawning.skipImpossibleCategories ? SpawnableCategories.get(level, chunk) : SpawnableCategories.ALL;
+ 
++        // Spawn rework: the per player headroom of every category in one pass over the nearby players (a spawn of one category only changes the counts of that category,
++        // so the headroom of the categories after it is the same as when read one category at a time), instead of one pass per category
++        final int[] headroom = HEADROOM_SCRATCH;
++        if (perPlayerMobSpawns && inRangePlayers != null && inRangeCount > 0) {
++            final int categoryCount = spawningCategories.size();
++            final int[] limits = LIMIT_SCRATCH;
++            for (int c = 0; c < categoryCount; c++) {
++                final MobCategory category = spawningCategories.get(c);
++                limits[c] = state.spawnLimit(level, category);
++                headroom[c] = Integer.MAX_VALUE;
++            }
++            for (int k = 0; k < inRangeCount; k++) {
++                final net.minecraft.server.level.ServerPlayer player = inRangePlayers[k];
++                final int[] mobCounts = player.mobCounts;
++                final int[] backoffCounts = player.mobBackoffCounts;
++                for (int c = 0; c < categoryCount; c++) {
++                    final int ordinal = spawningCategories.get(c).ordinal();
++                    final int diff = limits[c] - (mobCounts[ordinal] + backoffCounts[ordinal]);
++                    if (diff < headroom[c]) {
++                        headroom[c] = diff;
++                    }
++                }
++            }
++        }
++
++        int categoryIndex = -1;
+         for (MobCategory mobCategory : spawningCategories) {
++            categoryIndex++;
+             if ((possibleCategories & (1 << mobCategory.ordinal())) == 0) {
+                 continue;
+             }
+@@ -215,17 +245,7 @@ public final class NaturalSpawner {
+             final boolean canSpawn;
+             int maxSpawns = Integer.MAX_VALUE;
+             if (perPlayerMobSpawns) {
+-                // Copied from getFilteredSpawningCategories
+-                int limit = state.spawnLimit(level, mobCategory); // Leaf port - per tick cache of the Bukkit spawn limit
+-
+-                // Apply per-player limit
+-                int minDiff = Integer.MAX_VALUE;
+-                if (inRangePlayers != null) {
+-                    for (int k = 0, len = inRangeCount; k < len; k++) {
+-                        minDiff = Math.min(limit - chunkMap.getMobCountNear(inRangePlayers[k], mobCategory), minDiff);
+-                    }
+-                }
+-
++                final int minDiff = inRangePlayers == null || inRangeCount == 0 ? Integer.MAX_VALUE : headroom[categoryIndex];
+                 maxSpawns = (minDiff == Integer.MAX_VALUE) ? 0 : minDiff;
+                 canSpawn = maxSpawns > 0;
+             } else {
+@@ -348,7 +368,7 @@ public final class NaturalSpawner {
+                     pos.set(x, yStart, z);
+                     double xx = x + 0.5;
+                     double zz = z + 0.5;
+-                    Player nearestPlayer = level.getNearestPlayer(xx, yStart, zz, -1.0, false);
++                    Player nearestPlayer = nearestNonSpectatorPlayer(level, xx, yStart, zz); // spawn rework - same result as level.getNearestPlayer(xx, yStart, zz, -1.0, false)
+                     if (nearestPlayer != null) {
+                         double nearestPlayerDistanceSqr = nearestPlayer.distanceToSqr(xx, yStart, zz);
+                         if (((origin != null && (x >> 4) == originX && (z >> 4) == originZ) ? level.getWorldBorder().isWithinBounds(pos) : level.isLoadedAndInBounds(pos)) && isRightDistanceToPlayerAndSpawnPoint(level, chunk, pos, nearestPlayerDistanceSqr)) { // Paper - don't load chunks for mob spawn
+@@ -418,6 +438,23 @@ public final class NaturalSpawner {
+         }
+     }
+ 
++    // Same player as EntityGetter.getNearestPlayer(x, y, z, -1.0, NO_SPECTATORS) (first of equal distances wins), but the spectator test only runs for a player that would be the new best
++    private static @Nullable Player nearestNonSpectatorPlayer(final ServerLevel level, final double x, final double y, final double z) {
++        double best = -1.0;
++        Player result = null;
++        final List<net.minecraft.server.level.ServerPlayer> players = level.players();
++        for (int i = 0, size = players.size(); i < size; i++) {
++            final net.minecraft.server.level.ServerPlayer player = players.get(i);
++            final double dist = player.distanceToSqr(x, y, z);
++            if ((best == -1.0 || dist < best) && !player.isSpectator()) {
++                best = dist;
++                result = player;
++            }
++        }
++
++        return result;
++    }
++
+     private static boolean isRightDistanceToPlayerAndSpawnPoint(
+         final ServerLevel level, final ChunkAccess chunk, final BlockPos.MutableBlockPos pos, final double nearestPlayerDistanceSqr
+     ) {

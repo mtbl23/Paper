@@ -178,6 +178,10 @@ public class WorldConfiguration extends ConfigurationPart {
             public List<NbtPathArgument.NbtPath> filteredEntityTagNbtPaths = NbtPathSerializer.fromString(List.of("Pos", "Motion", "sleeping_pos"));
             public boolean disableMobSpawnerSpawnEggTransformation = false;
             public boolean perPlayerMobSpawns = true;
+            @Comment("Skip natural spawn attempts for mob categories that cannot succeed around a chunk (no biome or structure spawn list for the category within one chunk, no water nearby for water-only categories). The skipped attempts could not have spawned anything, so the spawn rate is unchanged. Biome and water data is refreshed every 200 ticks.")
+            public boolean skipImpossibleCategories = false;
+            @Comment("Count the mobs for natural spawning only every this many ticks (1 = every tick, as vanilla). Between counts the last count plus the spawns since is used, so mobs that die or despawn in between are only seen at the next count. Needs per-player-mob-spawns.")
+            public int spawnStateReuseTicks = 1;
             public boolean scanForLegacyEnderDragon = true;
             @MergeMap
             public Reference2IntMap<MobCategory> spawnLimits = Util.make(new Reference2IntOpenHashMap<>(NaturalSpawner.SPAWNING_CATEGORIES.length), map -> Arrays.stream(NaturalSpawner.SPAWNING_CATEGORIES).forEach(mobCategory -> map.put(mobCategory, -1)));
