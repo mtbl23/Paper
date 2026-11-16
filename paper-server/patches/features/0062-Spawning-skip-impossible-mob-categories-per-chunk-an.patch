@@ -1,0 +1,295 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mtbl23 <182822903+mtbl23@users.noreply.github.com>
+Date: Mon, 16 Nov 2026 14:14:08 -0500
+Subject: [PATCH] Spawning: skip impossible mob categories per chunk and reuse
+ the spawn state counts (off by default)
+
+entities.spawning.skip-impossible-categories skips the natural spawn attempt
+for a mob category when nothing within one chunk can host it (no biome or
+structure spawn list for the category, no water for water-only categories).
+Those attempts could not spawn anything, so the spawn rate is unchanged; the
+random numbers other systems see differ.
+
+entities.spawning.spawn-state-reuse-ticks counts the mobs for natural spawning
+only every N ticks and reuses the count plus the spawns since in between.
+
+diff --git a/net/minecraft/server/level/ServerChunkCache.java b/net/minecraft/server/level/ServerChunkCache.java
+index 632703e6913f4c5b7e8aa689b660ee1d2558eb41..bcdd0a3b7a63d57e00ba9a8184647ba0e2ac5078 100644
+--- a/net/minecraft/server/level/ServerChunkCache.java
++++ b/net/minecraft/server/level/ServerChunkCache.java
+@@ -549,12 +549,18 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
+         int chunkCount = this.distanceManager.getNaturalSpawnChunkCount();
+         // Paper start - Optional per player mob spawns
+         NaturalSpawner.SpawnState spawnCookie;
++        // Spawn rework: every spawn-state-reuse-ticks ticks the mobs are counted, the ticks in between use that count plus the spawns since (per player mob spawns only)
++        final int reuseTicks = this.level.paperConfig().entities.spawning.spawnStateReuseTicks;
++        final boolean reuseSpawnState = reuseTicks > 1 && this.lastSpawnState != null && this.level.paperConfig().entities.spawning.perPlayerMobSpawns
++            && (this.spawnFriendlies || this.spawnEnemies) && this.level.getGameTime() % reuseTicks != 0L;
+         if ((this.spawnFriendlies || this.spawnEnemies) && this.level.paperConfig().entities.spawning.perPlayerMobSpawns) { // don't count mobs when animals and monsters are disabled
+             // re-set mob counts
+             for (ServerPlayer player : this.level.players()) {
+                 // Paper start - per player mob spawning backoff
+                 for (int j = 0; j < ServerPlayer.MOBCATEGORY_TOTAL_ENUMS; j++) {
+-                    player.mobCounts[j] = 0;
++                    if (!reuseSpawnState) {
++                        player.mobCounts[j] = 0;
++                    }
+ 
+                     int newBackoff = player.mobBackoffCounts[j] - 1; // TODO make configurable bleed // TODO use nonlinear algorithm?
+                     if (newBackoff < 0) {
+@@ -564,7 +570,7 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
+                 }
+                 // Paper end - per player mob spawning backoff
+             }
+-            spawnCookie = NaturalSpawner.createState(chunkCount, this.level, this.fullChunkGetter, null, true);
++            spawnCookie = reuseSpawnState ? this.lastSpawnState.reuse(chunkCount) : NaturalSpawner.createState(chunkCount, this.level, this.fullChunkGetter, null, true);
+         } else {
+             spawnCookie = NaturalSpawner.createState(chunkCount, this.level, this.fullChunkGetter, !this.level.paperConfig().entities.spawning.perPlayerMobSpawns ? new LocalMobCapCalculator(this.chunkMap) : null, false);
+         }
+diff --git a/net/minecraft/world/attribute/EnvironmentAttributeSystem.java b/net/minecraft/world/attribute/EnvironmentAttributeSystem.java
+index 9403c3e781cd8acd4e9b0bfd2bf49058b7677513..a82e10a9546936b0169555685dd9d4a98459844e 100644
+--- a/net/minecraft/world/attribute/EnvironmentAttributeSystem.java
++++ b/net/minecraft/world/attribute/EnvironmentAttributeSystem.java
+@@ -53,6 +53,28 @@ public class EnvironmentAttributeSystem implements EnvironmentAttributeReader {
+             ? (EnvironmentAttributeSystem.ValueSampler<MobSpawnSettings>)spawnSampler : null; // Spawn rework
+     }
+ 
++    private final it.unimi.dsi.fastutil.objects.Reference2IntOpenHashMap<Biome> naturalSpawnCategoryMasks = new it.unimi.dsi.fastutil.objects.Reference2IntOpenHashMap<>();
++
++    // Spawn rework: bit mask (by MobCategory ordinal) of the categories that have a non-empty natural spawn list in the biome (all bits when unknown). Main thread only.
++    public int getNaturalSpawnCategoryMask(final Holder<Biome> biome) {
++        final Biome key = biome.value();
++        final int cached = this.naturalSpawnCategoryMasks.getOrDefault(key, -1);
++        if (cached != -1) {
++            return cached;
++        }
++
++        final MobSpawnSettings settings = this.getNaturalMobSpawnsOfBiome(biome);
++        int mask = 0;
++        for (final net.minecraft.world.entity.MobCategory category : net.minecraft.world.entity.MobCategory.values()) {
++            if (settings == null || !settings.getMobsToSpawn(category).isEmpty()) {
++                mask |= 1 << category.ordinal();
++            }
++        }
++
++        this.naturalSpawnCategoryMasks.put(key, mask);
++        return mask;
++    }
++
+     // Spawn rework: what getValue(NATURAL_MOB_SPAWNS, pos) returns when the full resolution biome at pos is the given one (null = not a plain biome layer, use getValue).
+     public @Nullable MobSpawnSettings getNaturalMobSpawnsOfBiome(final Holder<Biome> biome) {
+         final EnvironmentAttributeSystem.ValueSampler<MobSpawnSettings> sampler = this.naturalMobSpawnsBiomeSampler;
+diff --git a/net/minecraft/world/level/NaturalSpawner.java b/net/minecraft/world/level/NaturalSpawner.java
+index 53e2d95df39be594568baffcc6279b42ca18d9a9..733fedb9405b67e6699c07ba4b81c3b0eb06b100 100644
+--- a/net/minecraft/world/level/NaturalSpawner.java
++++ b/net/minecraft/world/level/NaturalSpawner.java
+@@ -204,7 +204,13 @@ public final class NaturalSpawner {
+         }
+         // Leaf port end
+ 
++        // Spawn rework: categories no attempt from this chunk can succeed in are skipped (off unless entities.spawning.skip-impossible-categories)
++        final int possibleCategories = level.paperConfig().entities.spawning.skipImpossibleCategories ? SpawnableCategories.get(level, chunk) : SpawnableCategories.ALL;
++
+         for (MobCategory mobCategory : spawningCategories) {
++            if ((possibleCategories & (1 << mobCategory.ordinal())) == 0) {
++                continue;
++            }
+             // Paper start - Optional per player mob spawns
+             final boolean canSpawn;
+             int maxSpawns = Integer.MAX_VALUE;
+@@ -745,6 +751,11 @@ public final class NaturalSpawner {
+             this.unmodifiableMobCategoryCounts = Object2IntMaps.unmodifiable(mobCategoryCounts);
+         }
+ 
++        // Spawn rework (entities.spawning.spawn-state-reuse-ticks): the counts of an earlier tick, with spawns since then included, for a new tick
++        public NaturalSpawner.SpawnState reuse(final int spawnableChunkCount) {
++            return new NaturalSpawner.SpawnState(spawnableChunkCount, this.mobCategoryCounts, this.spawnPotential, this.localMobCapCalculator);
++        }
++
+         private boolean canSpawn(final EntityType<?> type, final Level level, final BlockPos testPos, final ChunkAccess chunk) {
+             this.lastCheckedPos = testPos;
+             this.lastCheckedType = type;
+diff --git a/net/minecraft/world/level/SpawnableCategories.java b/net/minecraft/world/level/SpawnableCategories.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..2c06fcbc85740da318f0804c71bc0ee8ddf0a286
+--- /dev/null
++++ b/net/minecraft/world/level/SpawnableCategories.java
+@@ -0,0 +1,125 @@
++package net.minecraft.world.level;
++
++import it.unimi.dsi.fastutil.longs.LongSet;
++import java.util.Map;
++import net.minecraft.core.Holder;
++import net.minecraft.core.registries.BuiltInRegistries;
++import net.minecraft.server.level.ServerLevel;
++import net.minecraft.tags.FluidTags;
++import net.minecraft.world.entity.EntityType;
++import net.minecraft.world.entity.MobCategory;
++import net.minecraft.world.entity.SpawnPlacementTypes;
++import net.minecraft.world.entity.SpawnPlacements;
++import net.minecraft.world.level.biome.Biome;
++import net.minecraft.world.level.chunk.LevelChunk;
++import net.minecraft.world.level.chunk.LevelChunkSection;
++import net.minecraft.world.level.levelgen.structure.Structure;
++
++/**
++ * Spawn rework (config entities.spawning.skip-impossible-categories, off by default): which mob categories a natural spawn attempt
++ * from a chunk can possibly succeed in. A category that cannot succeed anywhere around the chunk is skipped for that chunk, which
++ * saves its random position, block read and biome lookups. The attempts that are skipped could not have spawned anything, so the
++ * spawn rate is unchanged; only the random numbers other systems see differ.
++ *
++ * <p>A category is possible for a chunk when some chunk in the 3x3 neighbourhood has a biome with a non-empty spawn list for it or
++ * a structure reference with a spawn override for it. A category that only spawns in water is possible only when some chunk in the
++ * neighbourhood has water in its block palettes. The data is cached on the chunks and refreshed every {@link #REFRESH_TICKS} ticks
++ * (biomes and structure references only change through plugins or generation, water through players and the world).
++ */
++public final class SpawnableCategories {
++    public static final int ALL = (1 << MobCategory.values().length) - 1;
++    public static final int REFRESH_TICKS = 200;
++    private static final int OWN_WATER_FLAG = 1 << 30;
++    private static final int UNLOADED_NEIGHBOUR_RETRY_TICKS = 20;
++    private static int waterOnlyCategories = -1;
++
++    private SpawnableCategories() {
++    }
++
++    // Categories whose every entity type needs water at the spawn position (derived from the spawn placements, not assumed)
++    private static int waterOnlyCategories() {
++        int mask = waterOnlyCategories;
++        if (mask == -1) {
++            mask = ALL;
++            for (final EntityType<?> type : BuiltInRegistries.ENTITY_TYPE) {
++                if (SpawnPlacements.getPlacementType(type) != SpawnPlacementTypes.IN_WATER) {
++                    mask &= ~(1 << type.getCategory().ordinal());
++                }
++            }
++            mask &= ~(1 << MobCategory.MISC.ordinal());
++            waterOnlyCategories = mask;
++        }
++
++        return mask;
++    }
++
++    /** Bit mask (by MobCategory ordinal) of the categories a spawn attempt from this chunk can succeed in. */
++    public static int get(final ServerLevel level, final LevelChunk chunk) {
++        final long now = level.getGameTime();
++        if (now < chunk.spawnableCategoryMaskExpiry) {
++            return chunk.spawnableCategoryMask;
++        }
++
++        return refresh(level, chunk, now);
++    }
++
++    private static int refresh(final ServerLevel level, final LevelChunk chunk, final long now) {
++        final int chunkX = chunk.getPos().x();
++        final int chunkZ = chunk.getPos().z();
++        int mask = 0;
++        boolean water = false;
++        boolean complete = true;
++        for (int dx = -1; dx <= 1; dx++) {
++            for (int dz = -1; dz <= 1; dz++) {
++                final LevelChunk neighbour = dx == 0 && dz == 0 ? chunk : level.getChunkSource().getChunkAtIfLoadedImmediately(chunkX + dx, chunkZ + dz);
++                if (neighbour == null) {
++                    complete = false;
++                    continue;
++                }
++
++                final int own = own(level, neighbour, now);
++                mask |= own & ALL;
++                water |= (own & OWN_WATER_FLAG) != 0;
++            }
++        }
++
++        if (!complete) {
++            mask = ALL; // an unloaded neighbour is unknown: allow everything and look again soon
++        } else if (!water) {
++            mask &= ~waterOnlyCategories();
++        }
++
++        chunk.spawnableCategoryMask = mask;
++        // staggered by chunk so that chunks loaded together do not all refresh in the same tick
++        chunk.spawnableCategoryMaskExpiry = now + (complete ? REFRESH_TICKS + Math.floorMod(chunk.getPos().longKey() * 0x9E3779B97F4A7C15L >>> 40, REFRESH_TICKS / 2) : UNLOADED_NEIGHBOUR_RETRY_TICKS);
++        return mask;
++    }
++
++    // Categories with a biome spawn list or structure spawn override in this chunk, plus OWN_WATER_FLAG when its block palettes may hold water
++    private static int own(final ServerLevel level, final LevelChunk chunk, final long now) {
++        if (now < chunk.ownSpawnableCategoryMaskExpiry) {
++            return chunk.ownSpawnableCategoryMask;
++        }
++
++        final int[] mask = {0};
++        boolean water = false;
++        final net.minecraft.world.attribute.EnvironmentAttributeSystem attributes = level.environmentAttributes();
++        for (final LevelChunkSection section : chunk.getSections()) {
++            section.getBiomes().forEachPaletteValue(biome -> mask[0] |= attributes.getNaturalSpawnCategoryMask(biome));
++            if (!water && !section.hasOnlyAir()) {
++                water = section.getStates().maybeHas(state -> !state.getFluidState().isEmpty() && state.getFluidState().is(FluidTags.WATER));
++            }
++        }
++
++        for (final Map.Entry<Structure, LongSet> reference : chunk.getAllReferences().entrySet()) {
++            for (final MobCategory category : reference.getKey().spawnOverrides().keySet()) {
++                mask[0] |= 1 << category.ordinal();
++            }
++        }
++
++        final int own = mask[0] | (water ? OWN_WATER_FLAG : 0);
++        chunk.ownSpawnableCategoryMask = own;
++        chunk.ownSpawnableCategoryMaskExpiry = now + REFRESH_TICKS / 2;
++        return own;
++    }
++}
+diff --git a/net/minecraft/world/level/chunk/LevelChunk.java b/net/minecraft/world/level/chunk/LevelChunk.java
+index 0709ba485bc5366685f20c6775adc4ab439bd85d..548919ce96ec032de51c7d7bcc5a9a43acf7e36f 100644
+--- a/net/minecraft/world/level/chunk/LevelChunk.java
++++ b/net/minecraft/world/level/chunk/LevelChunk.java
+@@ -140,6 +140,12 @@ public class LevelChunk extends ChunkAccess implements DebugValueSource, ca.spot
+     }
+     // Paper end - get block chunk optimisation
+ 
++    // Spawn rework (SpawnableCategories): cached mob categories a spawn attempt from this chunk can succeed in, and the chunk's own contribution
++    public int spawnableCategoryMask;
++    public long spawnableCategoryMaskExpiry;
++    public int ownSpawnableCategoryMask;
++    public long ownSpawnableCategoryMaskExpiry;
++
+     public LevelChunk(final Level level, final ChunkPos pos) {
+         this(level, pos, UpgradeData.EMPTY, new LevelChunkTicks<>(), new LevelChunkTicks<>(), 0L, null, null, null);
+     }
+diff --git a/net/minecraft/world/level/chunk/PalettedContainer.java b/net/minecraft/world/level/chunk/PalettedContainer.java
+index 11fe529b71a51ab2288b61b16cfc0f6919622272..77679df0ece739d9057c241665e3f316f94a18a2 100644
+--- a/net/minecraft/world/level/chunk/PalettedContainer.java
++++ b/net/minecraft/world/level/chunk/PalettedContainer.java
+@@ -458,6 +458,17 @@ public class PalettedContainer<T> implements PaletteResize<T>, PalettedContainer
+         return data.storage.getBits() == 0 ? data.palette.valueFor(0) : null;
+     }
+ 
++    @Override
++    public void forEachPaletteValue(final Consumer<T> consumer) {
++        final Palette<T> palette = this.data.palette;
++        for (int i = 0, size = palette.getSize(); i < size; i++) {
++            final T value = palette.valueFor(i);
++            if (value != null) {
++                consumer.accept(value);
++            }
++        }
++    }
++
+     @Override
+     public int bitsPerEntry() {
+         return this.data.storage().getBits();
+diff --git a/net/minecraft/world/level/chunk/PalettedContainerRO.java b/net/minecraft/world/level/chunk/PalettedContainerRO.java
+index a7e4cb3b8f00410b08df8d7e7c393c0a231173aa..ef006f9e762d834610f0e489abb0a938c2565780 100644
+--- a/net/minecraft/world/level/chunk/PalettedContainerRO.java
++++ b/net/minecraft/world/level/chunk/PalettedContainerRO.java
+@@ -15,6 +15,9 @@ public interface PalettedContainerRO<T> {
+     /** Spawn rework: the only value of a container that holds a single value (zero bits per entry), else null. */
+     @org.jspecify.annotations.Nullable T getSingleValueOrNull();
+ 
++    /** Spawn rework: every value in the palette (a value no longer stored may remain in it). */
++    void forEachPaletteValue(Consumer<T> consumer);
++
+     void getAll(Consumer<T> consumer);
+ 
+     // Paper start - Anti-Xray - Add chunk packet info

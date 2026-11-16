@@ -1,0 +1,342 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mtbl23 <182822903+mtbl23@users.noreply.github.com>
+Date: Mon, 16 Nov 2026 14:08:52 -0500
+Subject: [PATCH] Spawning: exact fast paths for the chunk being ticked,
+ single-biome sections and spawn state counting
+
+Spawn pass positions that fall inside the chunk being ticked read the start
+block, structure references, block below and loaded check from that chunk
+instead of looking it up again. A position at least 2 blocks from every face of
+a section with a single biome gets that biome without the fiddled corner
+search. createState counts by ordinal and reads the world config once.
+Behaviour: identical (same random draws, same results).
+
+diff --git a/net/minecraft/world/attribute/EnvironmentAttributeSystem.java b/net/minecraft/world/attribute/EnvironmentAttributeSystem.java
+index 23beb4de00f41dc0aeb63ff68df29dabbfc5bc2e..9403c3e781cd8acd4e9b0bfd2bf49058b7677513 100644
+--- a/net/minecraft/world/attribute/EnvironmentAttributeSystem.java
++++ b/net/minecraft/world/attribute/EnvironmentAttributeSystem.java
+@@ -34,6 +34,8 @@ public class EnvironmentAttributeSystem implements EnvironmentAttributeReader {
+     // Leaf port start - skip the NATURAL_MOB_SPAWNS lookup for entity types that no biome gives a spawn cost (null = unknown, always look up)
+     private final @Nullable Set<EntityType<?>> naturalMobSpawnCostTypes;
+     // Leaf port end
++    // Spawn rework: set when NATURAL_MOB_SPAWNS is exactly the constant base value plus the one positional biome layer, so the value is a pure function of the biome
++    private final EnvironmentAttributeSystem.@Nullable ValueSampler<MobSpawnSettings> naturalMobSpawnsBiomeSampler;
+ 
+     private EnvironmentAttributeSystem(
+         final Map<EnvironmentAttribute<?>, List<EnvironmentAttributeLayer<?>>> layersByAttribute, final @Nullable Set<EntityType<?>> biomeSpawnCostTypes
+@@ -46,6 +48,19 @@ public class EnvironmentAttributeSystem implements EnvironmentAttributeReader {
+                 )
+         );
+         this.naturalMobSpawnCostTypes = this.computeNaturalMobSpawnCostTypes(biomeSpawnCostTypes); // Leaf port
++        final EnvironmentAttributeSystem.ValueSampler<?> spawnSampler = this.attributeSamplers.get(EnvironmentAttributes.NATURAL_MOB_SPAWNS);
++        this.naturalMobSpawnsBiomeSampler = spawnSampler != null && spawnSampler.layers.size() == 1 && spawnSampler.layers.getFirst() instanceof EnvironmentAttributeLayer.Positional
++            ? (EnvironmentAttributeSystem.ValueSampler<MobSpawnSettings>)spawnSampler : null; // Spawn rework
++    }
++
++    // Spawn rework: what getValue(NATURAL_MOB_SPAWNS, pos) returns when the full resolution biome at pos is the given one (null = not a plain biome layer, use getValue).
++    public @Nullable MobSpawnSettings getNaturalMobSpawnsOfBiome(final Holder<Biome> biome) {
++        final EnvironmentAttributeSystem.ValueSampler<MobSpawnSettings> sampler = this.naturalMobSpawnsBiomeSampler;
++        if (sampler == null) {
++            return null;
++        }
++
++        return sampler.attribute.sanitizeValue(biome.value().getAttributes().applyModifier(sampler.attribute, sampler.baseValue));
+     }
+ 
+     // Leaf port start - Inspired by Leaf's async/optimised mob counting (createState); independent, vanilla-identical implementation.
+diff --git a/net/minecraft/world/level/NaturalSpawner.java b/net/minecraft/world/level/NaturalSpawner.java
+index a4657e6e08a5b19dfeb565c5d528dd20726f2ae5..53e2d95df39be594568baffcc6279b42ca18d9a9 100644
+--- a/net/minecraft/world/level/NaturalSpawner.java
++++ b/net/minecraft/world/level/NaturalSpawner.java
+@@ -42,6 +42,7 @@ import net.minecraft.world.level.block.state.BlockState;
+ import net.minecraft.world.level.chunk.ChunkAccess;
+ import net.minecraft.world.level.chunk.ChunkGenerator;
+ import net.minecraft.world.level.chunk.LevelChunk;
++import net.minecraft.world.level.chunk.LevelChunkSection;
+ import net.minecraft.world.level.gamerules.GameRules;
+ import net.minecraft.world.level.levelgen.Heightmap;
+ import net.minecraft.world.level.levelgen.structure.BuiltinStructures;
+@@ -83,20 +84,33 @@ public final class NaturalSpawner {
+         Iterable<Entity> entities = level.getAllEntities();
+         PotentialCalculator spawnPotential = new PotentialCalculator();
+         Object2IntOpenHashMap<MobCategory> mobCounts = new Object2IntOpenHashMap<>();
++        // Spawn rework: counts by ordinal instead of hashing the category per mob, the world config read once, and the chunk of the previous mob remembered (nothing loads or unloads in here)
++        final int[] categoryCounts = new int[MobCategory.values().length];
++        final boolean countAllMobsForSpawning = level.paperConfig().entities.spawning.countAllMobsForSpawning;
++        long lastChunkKey = Long.MIN_VALUE;
++        LevelChunk lastChunk = null;
+ 
+         for (Entity entity : entities) {
+             if (!(entity instanceof Mob mob && (mob.isPersistenceRequired() || mob.requiresCustomPersistence()))) {
+                 MobCategory category = entity.getType().getCategory();
+                 if (category != MobCategory.MISC) {
+                     // Paper start - Only count natural spawns
+-                    if (!entity.level().paperConfig().entities.spawning.countAllMobsForSpawning &&
++                    if (!countAllMobsForSpawning &&
+                         !(entity.spawnReason == org.bukkit.event.entity.CreatureSpawnEvent.SpawnReason.NATURAL ||
+                             entity.spawnReason == org.bukkit.event.entity.CreatureSpawnEvent.SpawnReason.CHUNK_GEN)) {
+                         continue;
+                     }
+                     // Paper end - Only count natural spawns
+                     BlockPos pos = entity.blockPosition();
+-                    final LevelChunk chunk = chunkGetter.get(ChunkPos.pack(pos));
++                    final long chunkKey = ChunkPos.pack(pos);
++                    final LevelChunk chunk;
++                    if (chunkKey == lastChunkKey) {
++                        chunk = lastChunk;
++                    } else {
++                        chunk = chunkGetter.get(chunkKey);
++                        lastChunkKey = chunkKey;
++                        lastChunk = chunk;
++                    }
+                     if (chunk != null) {
+                         MobSpawnSettings.MobSpawnCost mobSpawnCost = getNaturalMobSpawnCost(level, pos, entity.getType()); // Leaf port - skip biome lookup for types without a cost
+                         if (mobSpawnCost != null) {
+@@ -107,7 +121,7 @@ public final class NaturalSpawner {
+                             localMobCapCalculator.addMob(chunk.getPos(), category);
+                         }
+ 
+-                        mobCounts.addTo(category, 1);
++                        categoryCounts[category.ordinal()]++;
+                         // Paper start - Optional per player mob spawns
+                         if (countMobs) {
+                             ((ServerLevel) chunk.getLevel()).getChunkSource().chunkMap.updatePlayerMobTypeMap(entity);
+@@ -118,6 +132,13 @@ public final class NaturalSpawner {
+             }
+         }
+ 
++        for (final MobCategory category : MobCategory.values()) {
++            final int count = categoryCounts[category.ordinal()];
++            if (count != 0) {
++                mobCounts.put(category, count);
++            }
++        }
++
+         return new NaturalSpawner.SpawnState(spawnableChunkCount, mobCounts, spawnPotential, localMobCapCalculator);
+     }
+ 
+@@ -246,7 +267,7 @@ public final class NaturalSpawner {
+         // Paper end - Optional per player mob spawns
+         BlockPos start = getRandomPosWithin(level, chunk);
+         if (start.getY() >= level.getMinY() + 1) {
+-            spawnCategoryForPosition(mobCategory, level, chunk, start, extraTest, spawnCallback, maxSpawns, trackEntity); // Paper - Optional per player mob spawns
++            spawnCategoryForPosition(mobCategory, level, chunk, start, extraTest, spawnCallback, maxSpawns, trackEntity, chunk); // Paper - Optional per player mob spawns; spawn rework - the chunk being ticked is the loaded chunk of the start position
+         }
+     }
+ 
+@@ -275,12 +296,33 @@ public final class NaturalSpawner {
+         final NaturalSpawner.AfterSpawnCallback spawnCallback,
+         final int maxSpawns,
+         final @Nullable Consumer<Entity> trackEntity
++    ) {
++        spawnCategoryForPosition(mobCategory, level, chunk, start, extraTest, spawnCallback, maxSpawns, trackEntity, null);
++    }
++
++    // Spawn rework: origin is the loaded full chunk containing start (the chunk being ticked), or null when the caller cannot vouch for that.
++    // Positions that fall inside it skip the chunk lookups (loaded check, structure references, block below, biome) that would return that same chunk.
++    private static void spawnCategoryForPosition(
++        final MobCategory mobCategory,
++        final ServerLevel level,
++        final ChunkAccess chunk,
++        final BlockPos start,
++        final NaturalSpawner.SpawnPredicate extraTest,
++        final NaturalSpawner.AfterSpawnCallback spawnCallback,
++        final int maxSpawns,
++        final @Nullable Consumer<Entity> trackEntity,
++        final @Nullable LevelChunk originArg
+     ) {
+         // Paper end - Optional per player mob spawns
++        final LevelChunk origin = level.captureTreeGeneration ? null : originArg;
++        final int originX = origin == null ? 0 : origin.getPos().x();
++        final int originZ = origin == null ? 0 : origin.getPos().z();
+         StructureManager structureManager = level.structureManager();
+         ChunkGenerator generator = level.getChunkSource().getGenerator();
+         int yStart = start.getY();
+-        BlockState state = level.getBlockStateIfLoadedAndInBounds(start); // Paper - don't load chunks for mob spawn
++        BlockState state = origin != null && (start.getX() >> 4) == originX && (start.getZ() >> 4) == originZ // Paper - don't load chunks for mob spawn; spawn rework - read the start block from the origin chunk
++                ? (level.getWorldBorder().isWithinBounds(start) ? (level.isOutsideBuildHeight(start) ? Blocks.VOID_AIR.defaultBlockState() : origin.getBlockState(start)) : null)
++                : level.getBlockStateIfLoadedAndInBounds(start);
+         if (state != null && !state.isRedstoneConductor(chunk, start)) { // Paper - don't load chunks for mob spawn
+             BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
+             int clusterSize = 0;
+@@ -303,11 +345,11 @@ public final class NaturalSpawner {
+                     Player nearestPlayer = level.getNearestPlayer(xx, yStart, zz, -1.0, false);
+                     if (nearestPlayer != null) {
+                         double nearestPlayerDistanceSqr = nearestPlayer.distanceToSqr(xx, yStart, zz);
+-                        if (level.isLoadedAndInBounds(pos) && isRightDistanceToPlayerAndSpawnPoint(level, chunk, pos, nearestPlayerDistanceSqr)) { // Paper - don't load chunks for mob spawn
++                        if (((origin != null && (x >> 4) == originX && (z >> 4) == originZ) ? level.getWorldBorder().isWithinBounds(pos) : level.isLoadedAndInBounds(pos)) && isRightDistanceToPlayerAndSpawnPoint(level, chunk, pos, nearestPlayerDistanceSqr)) { // Paper - don't load chunks for mob spawn
+                             final boolean spawnDataSelectedHere = currentSpawnData == null; // Leaf port
+                             if (spawnDataSelectedHere) {
+                                 Optional<MobSpawnSettings.SpawnerData> nextSpawnData = getRandomSpawnMobAt(
+-                                    level, structureManager, generator, mobCategory, level.random, pos
++                                    level, structureManager, generator, mobCategory, level.random, pos, origin != null && (x >> 4) == originX && (z >> 4) == originZ ? origin : null
+                                 );
+                                 if (nextSpawnData.isEmpty()) {
+                                     break;
+@@ -318,7 +360,7 @@ public final class NaturalSpawner {
+                             }
+ 
+                             // Paper start - PreCreatureSpawnEvent
+-                            PreSpawnStatus doSpawning = isValidSpawnPostitionForType(level, mobCategory, structureManager, generator, currentSpawnData, pos, nearestPlayerDistanceSqr, spawnDataSelectedHere);
++                            PreSpawnStatus doSpawning = isValidSpawnPostitionForType(level, mobCategory, structureManager, generator, currentSpawnData, pos, nearestPlayerDistanceSqr, spawnDataSelectedHere, origin != null && (x >> 4) == originX && (z >> 4) == originZ ? origin : null);
+                             // Paper start - per player mob count backoff
+                             if (doSpawning == PreSpawnStatus.ABORT || doSpawning == PreSpawnStatus.CANCELLED) {
+                                 level.getChunkSource().chunkMap.updateFailurePlayerMobTypeMap(pos.getX() >> 4, pos.getZ() >> 4, mobCategory);
+@@ -403,7 +445,8 @@ public final class NaturalSpawner {
+         final MobSpawnSettings.SpawnerData currentSpawnData,
+         final BlockPos.MutableBlockPos pos,
+         final double nearestPlayerDistanceSqr,
+-        final boolean spawnDataSelectedHere // Leaf port
++        final boolean spawnDataSelectedHere, // Leaf port
++        final @Nullable LevelChunk posChunk // spawn rework - the loaded chunk containing pos when known
+     ) {
+         // Paper start - PreCreatureSpawnEvent
+         EntityType<?> type = currentSpawnData.type();
+@@ -427,7 +470,7 @@ public final class NaturalSpawner {
+             && (type.canSpawnFarFromPlayer() || !(nearestPlayerDistanceSqr > type.getCategory().getDespawnDistance() * type.getCategory().getDespawnDistance()))
+             && type.canSummon()
+             // Leaf port - the spawn data was just drawn from the very list canSpawnMobAt would look it up in, at the same position, with no event in between
+-            && ((spawnDataSelectedHere && !hasPreSpawnEventListeners) || canSpawnMobAt(level, structureManager, generator, mobCategory, currentSpawnData, pos))
++            && ((spawnDataSelectedHere && !hasPreSpawnEventListeners) || canSpawnMobAt(level, structureManager, generator, mobCategory, currentSpawnData, pos, posChunk))
+             && SpawnPlacements.isSpawnPositionOk(type, level, pos)
+             && SpawnPlacements.checkSpawnRules(type, level, EntitySpawnReason.NATURAL, pos, level.random)
+             && level.noCollision(type.getSpawnAABB(pos.getX() + 0.5, pos.getY(), pos.getZ() + 0.5));
+@@ -464,12 +507,13 @@ public final class NaturalSpawner {
+         final ChunkGenerator generator,
+         final MobCategory mobCategory,
+         final RandomSource random,
+-        final BlockPos pos
++        final BlockPos pos,
++        final @Nullable LevelChunk posChunk
+     ) {
+         // Leaf port - only water ambient mobs need the biome (Leaf "optimize mob spawning": only query biomes for reduced water ambient spawns when needed); getBiome has no side effects
+         return mobCategory == MobCategory.WATER_AMBIENT && level.getBiome(pos).is(BiomeTags.REDUCED_WATER_AMBIENT_SPAWNS) && random.nextFloat() < 0.98F
+             ? Optional.empty()
+-            : mobsAt(level, structureManager, generator, mobCategory, pos).getRandom(random);
++            : mobsAt(level, structureManager, generator, mobCategory, pos, posChunk).getRandom(random);
+     }
+ 
+     private static boolean canSpawnMobAt(
+@@ -478,17 +522,50 @@ public final class NaturalSpawner {
+         final ChunkGenerator generator,
+         final MobCategory mobCategory,
+         final MobSpawnSettings.SpawnerData spawnerData,
+-        final BlockPos pos
++        final BlockPos pos,
++        final @Nullable LevelChunk posChunk
+     ) {
+-        return mobsAt(level, structureManager, generator, mobCategory, pos).contains(spawnerData);
++        return mobsAt(level, structureManager, generator, mobCategory, pos, posChunk).contains(spawnerData);
+     }
+ 
+     private static WeightedList<MobSpawnSettings.SpawnerData> mobsAt(
+-        final ServerLevel level, final StructureManager structureManager, final ChunkGenerator generator, final MobCategory mobCategory, final BlockPos pos
++        final ServerLevel level, final StructureManager structureManager, final ChunkGenerator generator, final MobCategory mobCategory, final BlockPos pos,
++        final @Nullable LevelChunk posChunk
+     ) {
+-        return isInNetherFortressBounds(pos, level, mobCategory, structureManager)
+-            ? NetherFortressStructure.FORTRESS_ENEMIES
+-            : generator.getMobsAt(level, structureManager, mobCategory, pos);
++        // Spawn rework: posChunk (the loaded chunk containing pos, or null) answers the block below, the structure references and the biome without chunk lookups
++        if (posChunk == null || generator instanceof org.bukkit.craftbukkit.generator.CustomChunkGenerator) {
++            return isInNetherFortressBounds(pos, level, mobCategory, structureManager)
++                ? NetherFortressStructure.FORTRESS_ENEMIES
++                : generator.getMobsAt(level, structureManager, mobCategory, pos);
++        }
++
++        if (mobCategory == MobCategory.MONSTER && posChunk.getBlockState(pos.below()).is(Blocks.NETHER_BRICKS)) {
++            Structure fortress = structureManager.registryAccess().lookupOrThrow(Registries.STRUCTURE).getValue(BuiltinStructures.FORTRESS);
++            if (fortress != null && structureManager.getStructureAt(pos, fortress).isValid()) {
++                return NetherFortressStructure.FORTRESS_ENEMIES;
++            }
++        }
++
++        return generator.getMobsAt(level, structureManager, mobCategory, pos, posChunk.getAllReferences(), singleBiomeAt(posChunk, pos));
++    }
++
++    // The biome that the full resolution lookup returns at pos when it cannot be anything else: pos is at least 2 blocks from every section face
++    // (all 8 corner cells of the fiddled lookup lie inside the section) and the section has a single biome. Null otherwise.
++    private static @Nullable Holder<Biome> singleBiomeAt(final LevelChunk chunk, final BlockPos pos) {
++        final int localX = pos.getX() & 15;
++        final int localY = pos.getY() & 15;
++        final int localZ = pos.getZ() & 15;
++        if (localX < 2 || localX > 13 || localY < 2 || localY > 13 || localZ < 2 || localZ > 13) {
++            return null;
++        }
++
++        final int sectionIndex = chunk.getSectionIndex(pos.getY());
++        final LevelChunkSection[] sections = chunk.getSections();
++        if (sectionIndex < 0 || sectionIndex >= sections.length) {
++            return null;
++        }
++
++        return sections[sectionIndex].getBiomes().getSingleValueOrNull();
+     }
+ 
+     public static boolean isInNetherFortressBounds(
+diff --git a/net/minecraft/world/level/chunk/ChunkGenerator.java b/net/minecraft/world/level/chunk/ChunkGenerator.java
+index 221657b7387f4ab0a1862127c90499f97bcc2276..d1f3523c29a1b6e532c884d3ea35694348db4c64 100644
+--- a/net/minecraft/world/level/chunk/ChunkGenerator.java
++++ b/net/minecraft/world/level/chunk/ChunkGenerator.java
+@@ -645,8 +645,15 @@ public abstract class ChunkGenerator {
+     public WeightedList<MobSpawnSettings.SpawnerData> getMobsAt(
+         final Level level, final StructureManager structureManager, final MobCategory mobCategory, final BlockPos pos
+     ) {
+-        Map<Structure, LongSet> structures = structureManager.getAllStructuresAt(pos);
++        return this.getMobsAt(level, structureManager, mobCategory, pos, structureManager.getAllStructuresAt(pos), null);
++    }
+ 
++    // Spawn rework: the same lookup with the structure references at pos already resolved and, when known, the biome the full resolution
++    // lookup returns at pos (null = look it up). The caller guarantees both; the result is the vanilla one.
++    public WeightedList<MobSpawnSettings.SpawnerData> getMobsAt(
++        final Level level, final StructureManager structureManager, final MobCategory mobCategory, final BlockPos pos,
++        final Map<Structure, LongSet> structures, final net.minecraft.core.@org.jspecify.annotations.Nullable Holder<net.minecraft.world.level.biome.Biome> knownBiome
++    ) {
+         for (Entry<Structure, LongSet> entry : structures.entrySet()) {
+             Structure structure = entry.getKey();
+             StructureSpawnOverride override = structure.spawnOverrides().get(mobCategory);
+@@ -666,6 +673,13 @@ public abstract class ChunkGenerator {
+             }
+         }
+ 
++        if (knownBiome != null) {
++            final MobSpawnSettings settings = level.environmentAttributes().getNaturalMobSpawnsOfBiome(knownBiome);
++            if (settings != null) {
++                return settings.getMobsToSpawn(mobCategory);
++            }
++        }
++
+         return level.environmentAttributes().getValue(EnvironmentAttributes.NATURAL_MOB_SPAWNS, pos).getMobsToSpawn(mobCategory);
+     }
+ 
+diff --git a/net/minecraft/world/level/chunk/PalettedContainer.java b/net/minecraft/world/level/chunk/PalettedContainer.java
+index d564338ddc3dc13f0d11a18e26ea36e1f9343745..11fe529b71a51ab2288b61b16cfc0f6919622272 100644
+--- a/net/minecraft/world/level/chunk/PalettedContainer.java
++++ b/net/minecraft/world/level/chunk/PalettedContainer.java
+@@ -452,6 +452,12 @@ public class PalettedContainer<T> implements PaletteResize<T>, PalettedContainer
+         return this.data.getSerializedSize(this.strategy.globalMap());
+     }
+ 
++    @Override
++    public @org.jspecify.annotations.Nullable T getSingleValueOrNull() {
++        final Data<T> data = this.data;
++        return data.storage.getBits() == 0 ? data.palette.valueFor(0) : null;
++    }
++
+     @Override
+     public int bitsPerEntry() {
+         return this.data.storage().getBits();
+diff --git a/net/minecraft/world/level/chunk/PalettedContainerRO.java b/net/minecraft/world/level/chunk/PalettedContainerRO.java
+index 45e95faebdb81485dc9b3823601f4506d8e85f25..a7e4cb3b8f00410b08df8d7e7c393c0a231173aa 100644
+--- a/net/minecraft/world/level/chunk/PalettedContainerRO.java
++++ b/net/minecraft/world/level/chunk/PalettedContainerRO.java
+@@ -12,6 +12,9 @@ import net.minecraft.network.FriendlyByteBuf;
+ public interface PalettedContainerRO<T> {
+     T get(int x, int y, int z);
+ 
++    /** Spawn rework: the only value of a container that holds a single value (zero bits per entry), else null. */
++    @org.jspecify.annotations.Nullable T getSingleValueOrNull();
++
+     void getAll(Consumer<T> consumer);
+ 
+     // Paper start - Anti-Xray - Add chunk packet info
