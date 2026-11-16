@@ -1,0 +1,116 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mtbl23 <mbhangal23@gmail.com>
+Date: Mon, 16 Nov 2026 15:01:32 -0500
+Subject: [PATCH] Batch the unflushed packets of the entity tracker window into
+ one netty task per connection
+
+
+diff --git a/net/minecraft/network/Connection.java b/net/minecraft/network/Connection.java
+index 76596e87945f0b95af8032338a64817a8faed4d0..6dae3164a0caa793e6cd2bf1611b5a65ad370706 100644
+--- a/net/minecraft/network/Connection.java
++++ b/net/minecraft/network/Connection.java
+@@ -462,6 +462,7 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
+      * @see <a href="https://mojira.dev/MC-308621">MC-308621</a>
+      */
+     private void scheduleNettyTask(final Runnable task) {
++        this.drainBatch(); // sub-track
+         final boolean connected = this.isConnected();
+         if (!connected && !this.preparing) {
+             return;
+@@ -493,8 +494,60 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
+     }
+     // Paper end - Add netty task scheduling helper
+ 
++    // sub-track start - batch the unflushed packets the server thread writes while the entity tracker runs
++    // While the window is open, packets without a listener that are written without a flush are collected per connection and handed to the event loop
++    // as ONE task at the end of the window, in the same order and before anything else is sent. The flush itself still happens when the server
++    // thread resumes flushing, so the bytes, their order and the moment they reach the client are unchanged; only the per-packet task, the
++    // lambda allocation and the event loop wake-up are saved.
++    private static boolean batchOpen;
++    private static final java.util.ArrayList<Connection> BATCHED = new java.util.ArrayList<>();
++    private java.util.ArrayList<Packet<?>> batch;
++
++    public static void beginBatch() {
++        batchOpen = true;
++    }
++
++    public static void endBatch() {
++        batchOpen = false;
++        for (int i = 0, len = BATCHED.size(); i < len; ++i) {
++            BATCHED.get(i).drainBatch();
++        }
++        BATCHED.clear();
++    }
++
++    private void drainBatch() {
++        final java.util.ArrayList<Packet<?>> packets = this.batch;
++        if (packets == null || packets.isEmpty()) {
++            return;
++        }
++        this.batch = null;
++        if (this.channel.eventLoop().inEventLoop()) {
++            for (int i = 0, len = packets.size(); i < len; ++i) {
++                this.doSendPacket(packets.get(i), null, false);
++            }
++        } else {
++            this.channel.eventLoop().execute(() -> {
++                for (int i = 0, len = packets.size(); i < len; ++i) {
++                    this.doSendPacket(packets.get(i), null, false);
++                }
++            });
++        }
++    }
++    // sub-track end
++
+     private void sendPacket(final Packet<?> packet, final @Nullable ChannelFutureListener listener, final boolean flush) {
+         this.sentPackets++;
++        // sub-track start
++        if (batchOpen && listener == null && !flush && io.papermc.paper.util.MCUtil.isMainThread()) {
++            if (this.batch == null) {
++                this.batch = new java.util.ArrayList<>(8);
++                BATCHED.add(this);
++            }
++            this.batch.add(packet);
++            return;
++        }
++        this.drainBatch();
++        // sub-track end
+         if (this.channel.eventLoop().inEventLoop()) {
+             this.doSendPacket(packet, listener, flush);
+         } else {
+@@ -543,6 +596,7 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
+     }
+ 
+     private void flush() {
++        this.drainBatch(); // sub-track
+         if (this.channel.eventLoop().inEventLoop()) {
+             this.channel.flush();
+         } else {
+@@ -670,6 +724,7 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
+ 
+     public void disconnect(final DisconnectionDetails details) {
+         this.preparing = false; // Spigot
++        this.drainBatch(); // sub-track
+         this.clearPacketQueue(); // Paper - Optimize network
+         if (this.channel == null) {
+             this.delayedDisconnect = details;
+diff --git a/net/minecraft/server/level/ChunkMap.java b/net/minecraft/server/level/ChunkMap.java
+index fd0b9f20fbdd523d51550fd6009b5011e6e7e6e6..e14a754e060b5f0bcb478b3bf8122eb59851f2ed 100644
+--- a/net/minecraft/server/level/ChunkMap.java
++++ b/net/minecraft/server/level/ChunkMap.java
+@@ -1095,6 +1095,7 @@ public class ChunkMap extends SimpleRegionStorage implements ChunkHolder.PlayerP
+ 
+     private void newTrackerTick() {
+         this.iteratingTrackerEntities = true;
++        net.minecraft.network.Connection.beginBatch(); // sub-track
+         try {
+             final ca.spottedleaf.moonrise.common.list.ReferenceList<net.minecraft.world.entity.Entity> trackerEntities = this.trackerEntities;
+             final Entity[] trackerEntitiesRaw = trackerEntities.getRawDataUnchecked();
+@@ -1111,6 +1112,7 @@ public class ChunkMap extends SimpleRegionStorage implements ChunkHolder.PlayerP
+                 }
+             }
+         } finally {
++            net.minecraft.network.Connection.endBatch(); // sub-track
+             this.iteratingTrackerEntities = false;
+         }
+     }

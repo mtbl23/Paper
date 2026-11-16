@@ -386,6 +386,16 @@ public class WorldConfiguration extends ConfigurationPart {
             public IntOr.Disabled inactiveMobGoalSelectorThrottleRate = IntOr.Disabled.DISABLED;
         }
 
+        public DistantEntityUpdates distantEntityUpdates;
+
+        // sub-track: Tier B, changes timing of far-away non-player entity updates only, off by default
+        public class DistantEntityUpdates extends ConfigurationPart {
+            public boolean enabled = false;
+            @Comment("Entities whose nearest viewer is at least this many blocks away send their movement and data updates only every 'interval' ticks.")
+            public int minDistance = 32;
+            public int interval = 2;
+        }
+
         public TrackingRangeY trackingRangeY;
 
         public class TrackingRangeY extends ConfigurationPart {
