@@ -366,7 +366,7 @@ public class WorldConfiguration extends ConfigurationPart {
         public class DistantEntityUpdates extends ConfigurationPart {
             public boolean enabled = false;
             @Comment("Entities whose nearest viewer is at least this many blocks away send their movement and data updates only every 'interval' ticks.")
-            public int minDistance = 64;
+            public int minDistance = 32;
             public int interval = 2;
         }
 
