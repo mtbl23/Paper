@@ -34,6 +34,8 @@ public final class FarEntityThrottle {
     private long nowTick = Long.MIN_VALUE;
     /** Throttled (skipped) entity ticks since start, for lab statistics. */
     public long skipped;
+    /** Lab statistics: set by the last shouldThrottle call that returned true, cleared by the caller. */
+    public boolean lastThrottled;
 
     public FarEntityThrottle(final ServerLevel level) {
         this.level = level;
@@ -108,6 +110,7 @@ public final class FarEntityThrottle {
             return false;
         }
         this.skipped++;
+        this.lastThrottled = true;
         return true;
     }
 
