@@ -1,0 +1,72 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mtbl23 <mbhangal23@gmail.com>
+Date: Mon, 16 Nov 2026 14:16:27 -0500
+Subject: [PATCH] Far entity throttle: hooks
+
+
+diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
+index 8468a237c8d9d71780395940f1e5919b4056883f..a4d3e9b24dbf0366c88ac24af1dbab59daf09994 100644
+--- a/net/minecraft/server/level/ServerLevel.java
++++ b/net/minecraft/server/level/ServerLevel.java
+@@ -889,6 +889,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+                 profiler.pop();
+             }
+ 
++            this.farEntityThrottle.beginTick(); // Lab - far entity throttle
+             io.papermc.paper.entity.activation.ActivationRange.activateEntities(this); // Paper - EAR
+             this.entityTickList
+                 .forEach(
+@@ -1399,6 +1400,8 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+     }
+     // Paper end - log detailed entity tick information
+ 
++    public final io.papermc.paper.entity.activation.FarEntityThrottle farEntityThrottle = new io.papermc.paper.entity.activation.FarEntityThrottle(this); // Lab - far entity throttle
++
+     public void tickNonPassenger(final Entity entity) {
+         // Paper start - log detailed entity tick information
+         ca.spottedleaf.moonrise.common.util.TickThread.ensureTickThread("Cannot tick an entity off-main");
+@@ -1411,7 +1414,10 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+         profiler.push(entity.typeHolder()::getRegisteredName);
+         profiler.incrementCounter("tickNonPassenger");
+         entity.commonTick();
+-        final boolean isActive = io.papermc.paper.entity.activation.ActivationRange.checkIfActive(entity); // Paper - EAR 2
++        boolean isActive = io.papermc.paper.entity.activation.ActivationRange.checkIfActive(entity); // Paper - EAR 2
++        if (isActive && this.farEntityThrottle.enabled() && this.farEntityThrottle.shouldThrottle(entity)) { // Lab - far entity throttle
++            isActive = false;
++        }
+         if (isActive) { // Paper - EAR 2
+         entity.tick();
+         entity.postTick(); // CraftBukkit
+diff --git a/net/minecraft/world/entity/Entity.java b/net/minecraft/world/entity/Entity.java
+index 8ef292ee310fdd244daf080c2548b676fe0bf160..6d0fe05480ee2f8e1bc327f8d79d26be8738d7a8 100644
+--- a/net/minecraft/world/entity/Entity.java
++++ b/net/minecraft/world/entity/Entity.java
+@@ -388,6 +388,7 @@ public abstract class Entity
+     private final int despawnTime; // Paper - entity despawn time limit
+     public int totalEntityAge; // Paper - age-like counter for all entities
+     public final io.papermc.paper.entity.activation.ActivationType activationType = io.papermc.paper.entity.activation.ActivationType.activationTypeFor(this); // Paper - EAR 2/tracking ranges
++    public final byte farThrottleCategory = io.papermc.paper.entity.activation.FarEntityThrottle.categoryOf(this); // Lab - far entity throttle
+     // Paper start - EAR 2
+     public final boolean defaultActivationState;
+     public long activatedTick = Integer.MIN_VALUE;
+diff --git a/net/minecraft/world/entity/ExperienceOrb.java b/net/minecraft/world/entity/ExperienceOrb.java
+index 3a594416e711fc6fdbf0ac7c3484a9830324d4d8..918f9b4ae6b003876d5b2ad83a1cd1591a6e0c83 100644
+--- a/net/minecraft/world/entity/ExperienceOrb.java
++++ b/net/minecraft/world/entity/ExperienceOrb.java
+@@ -141,6 +141,16 @@ public class ExperienceOrb extends Entity {
+         return 0.03;
+     }
+ 
++    // Lab - far entity throttle: ages in real time on the ticks that skip the full tick (never reached without the throttle, orbs are always active)
++    @Override
++    public void inactiveTick() {
++        super.inactiveTick();
++        this.age++;
++        if (this.age >= 6000) {
++            this.discard(org.bukkit.event.entity.EntityRemoveEvent.Cause.DESPAWN);
++        }
++    }
++
+     @Override
+     public void tick() {
+         if (this.firstTick && this.level().isClientSide()) {

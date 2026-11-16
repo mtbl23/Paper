@@ -291,6 +291,28 @@ public class WorldConfiguration extends ConfigurationPart {
             }
         }
 
+        @Comment("""
+            Lab option, changes behaviour on purpose and is off by default. Entities farther than 'distance' blocks (horizontal) from every player
+            in the world only run their full tick every 'interval' ticks (other ticks use the inactive path, like entities outside the activation
+            range, so ages and despawn timers keep real time). Entities closer than that behave exactly as in vanilla.""")
+        public FarEntityThrottle farEntityThrottle;
+
+        public class FarEntityThrottle extends ConfigurationPart {
+            public boolean enabled = false;
+            @Comment("Horizontal distance in blocks. Set it at least as high as the entity tracking ranges so players never see a throttled entity.")
+            public int distance = 96;
+            @Comment("A throttled entity runs a full tick on one of every this many ticks.")
+            public int interval = 4;
+            public boolean monsters = true;
+            public boolean animals = true;
+            public boolean villagers = true;
+            public boolean otherMobs = true;
+            @Comment("Experience orbs. They keep merging every 20 ticks, only movement and the player search are throttled.")
+            public boolean experienceOrbs = true;
+            @Comment("Minecarts and boats. Off by default because it slows machines that use them.")
+            public boolean vehicles = false;
+        }
+
         public Behavior behavior;
 
         public class Behavior extends ConfigurationPart {
