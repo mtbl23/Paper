@@ -1,0 +1,67 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mtbl23 <mbhangal23@gmail.com>
+Date: Mon, 16 Nov 2026 14:29:48 -0500
+Subject: [PATCH] Block entity ticking: skip sleeping tickers directly and
+ compact removed tickers by index
+
+A sleeping ticker is never removed, has no position and does nothing, so the loop skips it without the four interface calls
+(isRemoved, getPos, the wrapper dispatch). The removed tickers are remembered by index and the list is compacted in one pass
+instead of building an identity hash set and calling removeAll; the resulting list is identical.
+
+diff --git a/net/minecraft/world/level/Level.java b/net/minecraft/world/level/Level.java
+index 74a37fdaeb86c191e1fed6d922c23fa1f77c5a2f..3301ebebc5ac4b24eab7f116273483b96de981f1 100644
+--- a/net/minecraft/world/level/Level.java
++++ b/net/minecraft/world/level/Level.java
+@@ -1507,16 +1507,25 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+         // Paper start - Fix MC-117075 use removeAll
+         // Only built when a ticker was removed: an empty removeAll still walked the whole ticker list (and null cannot be in it,
+         // the loop below would have thrown on it)
+-        it.unimi.dsi.fastutil.objects.ReferenceOpenHashSet<@Nullable TickingBlockEntity> toRemove = null;
++        // Upkeep: the indices of the removed tickers instead of an identity hash set, the list is compacted in one pass afterwards (same result
++        // as removeAll: the list is not modified while it is walked, new tickers wait in the pending list)
++        int[] removedIndices = null;
++        int removedCount = 0;
+         for (int tickerIndex = 0; tickerIndex < this.blockEntityTickers.size(); tickerIndex++) {
+             final TickingBlockEntity ticker = this.blockEntityTickers.get(tickerIndex);
+         // Paper end - Fix MC-117075 use removeAll
++            // Upkeep: a sleeping ticker is never removed, has no position and does nothing, skip it without the four interface calls
++            if (ticker.getClass() == net.minecraft.world.level.chunk.LevelChunk.RebindableTickingBlockEntityWrapper.class
++                && ((net.minecraft.world.level.chunk.LevelChunk.RebindableTickingBlockEntityWrapper)ticker).ticker == net.caffeinemc.mods.lithium.common.block.entity.SleepingBlockEntity.SLEEPING_BLOCK_ENTITY_TICKER) {
++                continue;
++            }
+             if (ticker.isRemoved()) {
+-                if (toRemove == null) {
+-                    toRemove = new it.unimi.dsi.fastutil.objects.ReferenceOpenHashSet<>();
+-                    toRemove.add(null);
++                if (removedIndices == null) {
++                    removedIndices = new int[8];
++                } else if (removedCount == removedIndices.length) {
++                    removedIndices = java.util.Arrays.copyOf(removedIndices, removedCount * 2);
+                 }
+-                toRemove.add(ticker); // Paper - Fix MC-117075 use removeAll
++                removedIndices[removedCount++] = tickerIndex; // Paper - Fix MC-117075 use removeAll
+             } else if (tickBlockEntities && this.shouldTickBlockEntityAt(ticker.getPos())) { // Lithium - a sleeping block entity ticker has no position and does nothing
+                 ticker.tick();
+                 // Paper start - rewrite chunk system
+@@ -1527,8 +1536,19 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+             }
+         }
+ 
+-        if (toRemove != null) {
+-            this.blockEntityTickers.removeAll(toRemove); // Paper - Fix MC-117075 use removeAll
++        if (removedCount != 0) {
++            final List<TickingBlockEntity> tickers = this.blockEntityTickers;
++            final int size = tickers.size();
++            int write = removedIndices[0];
++            int next = 1;
++            for (int read = write + 1; read < size; read++) {
++                if (next < removedCount && removedIndices[next] == read) {
++                    next++;
++                    continue;
++                }
++                tickers.set(write++, tickers.get(read));
++            }
++            tickers.subList(write, size).clear();
+         }
+         this.tickingBlockEntities = false;
+     }
