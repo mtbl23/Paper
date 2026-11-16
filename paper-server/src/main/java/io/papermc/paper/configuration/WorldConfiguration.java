@@ -358,6 +358,21 @@ public class WorldConfiguration extends ConfigurationPart {
             public IntOr.Disabled stuckEntityPoiRetryDelay = new IntOr.Disabled(OptionalInt.of(200));
             @Comment("If specified, this setting controls how often to tick inactive mobs' goal selectors. Higher values reduce the performance impact of ticking mobs that are far away. Measured in ticks.")
             public IntOr.Disabled inactiveMobGoalSelectorThrottleRate = IntOr.Disabled.DISABLED;
+            // Lab (sub-ai, Tier B): AI level of detail for idle mobs far from every player. Off by default.
+            public AiLod aiLod;
+
+            public class AiLod extends ConfigurationPart {
+                @Comment("When true, idle mobs that are further than near-distance from every player run their goal and target selection (and villager brains) less often. Mobs near a player, mobs with a target, hurt, tamed, leashed, ridden or in love, and raiders behave exactly as vanilla.")
+                public boolean enabled = false;
+                @Comment("Blocks (box distance on every axis). A mob within this distance of any non-spectator player is never throttled.")
+                public int nearDistance = 24;
+                @Comment("Far mobs run a full goal selection tick every this many ticks, staggered by entity id. Vanilla runs one every 2 ticks. Use an even number.")
+                public int goalSelectorRate = 8;
+                @Comment("Same for target selection (this is what makes a far mob notice a player, so keep it lower than the goal rate).")
+                public int targetSelectorRate = 4;
+                @Comment("Far villagers, piglins, hoglins and nautiluses tick their brain every this many ticks, staggered by entity id. Vanilla ticks it every tick.")
+                public int brainRate = 4;
+            }
         }
 
         public TrackingRangeY trackingRangeY;

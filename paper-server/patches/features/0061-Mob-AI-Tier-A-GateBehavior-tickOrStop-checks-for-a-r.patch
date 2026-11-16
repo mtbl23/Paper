@@ -1,0 +1,32 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mtbl23 <mbhangal23@gmail.com>
+Date: Mon, 16 Nov 2026 14:14:49 -0500
+Subject: [PATCH] Mob AI (Tier A): GateBehavior#tickOrStop checks for a running
+ child with a loop instead of a stream
+
+Same result (the gate stops when no child is RUNNING), no stream pipeline per
+running gate per tick.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+
+diff --git a/net/minecraft/world/entity/ai/behavior/GateBehavior.java b/net/minecraft/world/entity/ai/behavior/GateBehavior.java
+index 3adfb334068d3722329f91011c41d5e59b1956c9..e9b21b8b2873b12130a082b0bc5f47727ab25da3 100644
+--- a/net/minecraft/world/entity/ai/behavior/GateBehavior.java
++++ b/net/minecraft/world/entity/ai/behavior/GateBehavior.java
+@@ -85,7 +85,15 @@ public class GateBehavior<E extends LivingEntity> implements BehaviorControl<E>
+             }
+         }
+         // Paper end - Perf: Remove streams from hot code
+-        if (this.behaviors.stream().noneMatch(behavior -> behavior.getStatus() == Behavior.Status.RUNNING)) {
++        // Lab (sub-ai Tier A) - loop instead of a stream pipeline, same result (no child left running)
++        boolean anyRunning = false;
++        for (final BehaviorControl<? super E> behavior : this.behaviors) {
++            if (behavior.getStatus() == Behavior.Status.RUNNING) {
++                anyRunning = true;
++                break;
++            }
++        }
++        if (!anyRunning) {
+             this.doStop(level, body, timestamp);
+         }
+     }

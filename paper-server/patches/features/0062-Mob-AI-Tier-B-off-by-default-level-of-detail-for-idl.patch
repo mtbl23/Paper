@@ -1,0 +1,345 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mtbl23 <mbhangal23@gmail.com>
+Date: Mon, 16 Nov 2026 14:14:49 -0500
+Subject: [PATCH] Mob AI (Tier B, off by default): level of detail for idle
+ mobs far from every player
+
+paper-world config entities.behavior.ai-lod (enabled false by default). A mob
+more than near-distance (box distance) from every non-spectator player, with no
+target, not hurt, tamed, leashed, ridden, in love or raiding, runs its goal and
+target selector update every goal-selector-rate / target-selector-rate ticks
+instead of every 2, and villagers, piglins, hoglins and nautiluses tick their
+brain every brain-rate ticks. Staggered by entity id. Running goals that need
+an update every tick, navigation and controls still run every tick. Mobs near a
+player are on the vanilla schedule on the very next tick.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+
+diff --git a/io/papermc/paper/entity/activation/ActivationRange.java b/io/papermc/paper/entity/activation/ActivationRange.java
+index 829f7685904fd741e00403647ae76d32275c34a3..64fd4cae0bec6f2d910c2cb2925c7231a663fc9a 100644
+--- a/io/papermc/paper/entity/activation/ActivationRange.java
++++ b/io/papermc/paper/entity/activation/ActivationRange.java
+@@ -142,6 +142,7 @@ public final class ActivationRange {
+         maxRange = Math.max(maxRange, villagerActivationRange);
+         maxRange = Math.min((world.spigotConfig.simulationDistance << 4) - 8, maxRange);
+ 
++        final io.papermc.paper.configuration.WorldConfiguration.Entities.Behavior.AiLod aiLodConfig = AiLod.config(world); // Lab - AI level of detail
+         for (final Player player : world.players()) {
+             player.activatedTick = MinecraftServer.currentTick;
+             if (world.spigotConfig.ignoreSpectatorActivation && player.isSpectator()) {
+@@ -159,12 +160,17 @@ public final class ActivationRange {
+             ActivationType.VILLAGER.boundingBox = player.getBoundingBox().inflate(villagerActivationRange, worldHeight, villagerActivationRange);
+ 
+             final List<Entity> entities = world.getEntities((Entity) null, ActivationRange.maxBB, e -> true);
++            final boolean aiLod = aiLodConfig.enabled; // Lab - AI level of detail
++            final int aiLodNear = aiLodConfig.nearDistance;
+             final boolean tickMarkers = world.paperConfig().entities.markers.tick;
+             for (final Entity entity : entities) {
+                 if (!tickMarkers && entity instanceof Marker) {
+                     continue;
+                 }
+ 
++                if (aiLod) {
++                    AiLod.markNear(entity, player, aiLodNear); // Lab - AI level of detail
++                }
+                 ActivationRange.activateEntity(entity);
+             }
+         }
+diff --git a/io/papermc/paper/entity/activation/AiLod.java b/io/papermc/paper/entity/activation/AiLod.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..d3a96a34726ab16cae57dbfe291557ed63f5edbe
+--- /dev/null
++++ b/io/papermc/paper/entity/activation/AiLod.java
+@@ -0,0 +1,59 @@
++package io.papermc.paper.entity.activation;
++
++import io.papermc.paper.configuration.WorldConfiguration;
++import net.minecraft.server.MinecraftServer;
++import net.minecraft.world.entity.Entity;
++import net.minecraft.world.entity.Mob;
++import net.minecraft.world.entity.player.Player;
++import net.minecraft.world.level.Level;
++
++/**
++ * Lab (sub-ai, Tier B): AI level of detail. Off by default (paper-world config entities.behavior.ai-lod.enabled).
++ * <p>
++ * A mob is "in range" when it is inside the activation query box of a non-spectator player at the start of the entity phase and
++ * "near" when it is also within near-distance (box distance on every axis) of one (both marked by
++ * {@link ActivationRange#activateEntities}). Mobs outside every query box stay under Paper's own activation range logic.
++ * An in-range, not near and idle mob (see {@link Mob#aiLodEligible()}) runs the expensive part of its AI at a reduced rate: the
++ * goal and target selector update (which vanilla runs every second tick) and, for the whitelisted brain mobs, the brain tick.
++ * Running goals that need updating every tick, navigation, controls and everything else still run every tick. A near mob (or a
++ * mob that stops being idle) is back at the vanilla rate on the very next tick.
++ */
++public final class AiLod {
++    /** Ticks a mob stays "near" after the last player left the near box (avoids flapping at the boundary). */
++    private static final int NEAR_HYSTERESIS = 10;
++    /** New mobs always run at the vanilla rate for this long. */
++    private static final int WARMUP_TICKS = 100;
++
++    private AiLod() {
++    }
++
++    /** Called from {@link ActivationRange#activateEntities} for every entity in range of a player. */
++    static void markNear(final Entity entity, final Player player, final int near) {
++        if (!(entity instanceof final Mob mob)) {
++            return;
++        }
++        mob.aiRangeTick = MinecraftServer.currentTick; // in the query box of a player: Paper's activation range logic governs it, LOD only refines inside
++        if (Math.abs(entity.getX() - player.getX()) <= near
++            && Math.abs(entity.getZ() - player.getZ()) <= near
++            && Math.abs(entity.getY() - player.getY()) <= near) {
++            mob.aiNearTick = MinecraftServer.currentTick;
++        }
++    }
++
++    /** True when the mob must tick its selectors / brain at the reduced far rate (config enabled, far from players, idle). */
++    public static boolean isFar(final Mob mob, final WorldConfiguration.Entities.Behavior.AiLod cfg) {
++        return mob.aiRangeTick == MinecraftServer.currentTick
++            && MinecraftServer.currentTick - mob.aiNearTick > NEAR_HYSTERESIS
++            && mob.tickCount > WARMUP_TICKS
++            && mob.aiLodEligible();
++    }
++
++    /** True when this is not the mob's turn at the given far rate (staggered by entity id so the load is even). */
++    public static boolean skipTick(final Mob mob, final int rate) {
++        return rate > 1 && (mob.tickCount + mob.getId()) % rate != 0;
++    }
++
++    public static WorldConfiguration.Entities.Behavior.AiLod config(final Level level) {
++        return level.paperConfig().entities.behavior.aiLod;
++    }
++}
+diff --git a/net/minecraft/world/entity/Mob.java b/net/minecraft/world/entity/Mob.java
+index 0e928f7c38e7cf32bcc7412ac413b3ebdc9674c9..1e58ef2e75546fb74df74f961cfe399d8f1821b1 100644
+--- a/net/minecraft/world/entity/Mob.java
++++ b/net/minecraft/world/entity/Mob.java
+@@ -217,6 +217,40 @@ public abstract class Mob extends LivingEntity implements Targeting, EquipmentUs
+         return this.lookControl;
+     }
+ 
++    // Lab start - AI level of detail (Tier B, off by default), see io.papermc.paper.entity.activation.AiLod
++    public long aiNearTick = -1000L;
++    public long aiRangeTick = -1000L;
++
++    /** Idle and not entangled with anything a player can see or touch; only then may a far mob be throttled. */
++    public boolean aiLodEligible() {
++        return this.target == null
++            && !this.isPassenger()
++            && !this.isVehicle()
++            && !this.isLeashed()
++            && this.hurtTime == 0
++            && this.getLastHurtByMob() == null;
++    }
++
++    /** Brain mobs whose brain may be ticked at the far rate (a whitelist: only mobs whose brain does nothing a player can notice when idle). */
++    public boolean aiLodBrainEligible() {
++        return false;
++    }
++
++    /** True when the brain tick of this mob is skipped this tick (far, idle, not its turn). Called from Brain#tick. */
++    public final boolean aiLodSkipBrain() {
++        final io.papermc.paper.configuration.WorldConfiguration.Entities.Behavior.AiLod cfg = io.papermc.paper.entity.activation.AiLod.config(this.level());
++        return cfg.enabled
++            && io.papermc.paper.entity.activation.AiLod.skipTick(this, cfg.brainRate)
++            && this.aiLodBrainEligible()
++            && this.aiLodFar(cfg);
++    }
++
++    /** True when this mob's selectors/brain run at the far rate this tick. Only called with the feature enabled. */
++    public final boolean aiLodFar(final io.papermc.paper.configuration.WorldConfiguration.Entities.Behavior.AiLod cfg) {
++        return io.papermc.paper.entity.activation.AiLod.isFar(this, cfg);
++    }
++    // Lab end
++
+     // Paper start
+     private int inactiveTickDisableCounter;
+ 
+@@ -834,21 +868,31 @@ public abstract class Mob extends LivingEntity implements Targeting, EquipmentUs
+         this.sensing.tick();
+         profiler.pop();
+         int idBasedTickCount = this.tickCount + this.getId();
+-        if (idBasedTickCount % 2 != 0 && this.tickCount > 1) {
+-            profiler.push("targetSelector");
+-            this.targetSelector.tickRunningGoals(false);
+-            profiler.pop();
+-            profiler.push("goalSelector");
+-            this.goalSelector.tickRunningGoals(false);
+-            profiler.pop();
+-        } else {
+-            profiler.push("targetSelector");
++        // Lab start - AI level of detail: a far idle mob runs the full selector updates less often than every 2 ticks (rate 2 is vanilla)
++        int targetRate = 2;
++        int goalRate = 2;
++        final io.papermc.paper.configuration.WorldConfiguration.Entities.Behavior.AiLod aiLod = io.papermc.paper.entity.activation.AiLod.config(this.level());
++        if (aiLod.enabled && this.aiLodFar(aiLod)) {
++            targetRate = Math.max(2, aiLod.targetSelectorRate);
++            goalRate = Math.max(2, aiLod.goalSelectorRate);
++        }
++        final boolean fullTargetTick = idBasedTickCount % targetRate == 0 || this.tickCount <= 1;
++        final boolean fullGoalTick = idBasedTickCount % goalRate == 0 || this.tickCount <= 1;
++        profiler.push("targetSelector");
++        if (fullTargetTick) {
+             this.targetSelector.tick();
+-            profiler.pop();
+-            profiler.push("goalSelector");
++        } else {
++            this.targetSelector.tickRunningGoals(false);
++        }
++        profiler.pop();
++        profiler.push("goalSelector");
++        if (fullGoalTick) {
+             this.goalSelector.tick();
+-            profiler.pop();
++        } else {
++            this.goalSelector.tickRunningGoals(false);
+         }
++        profiler.pop();
++        // Lab end
+ 
+         profiler.push("navigation");
+         this.navigation.tick();
+diff --git a/net/minecraft/world/entity/TamableAnimal.java b/net/minecraft/world/entity/TamableAnimal.java
+index 8881d76b5346baf5f14926696e93e07dc0889a24..c751d46562b5955c62ead3efbc2710e6f014db44 100644
+--- a/net/minecraft/world/entity/TamableAnimal.java
++++ b/net/minecraft/world/entity/TamableAnimal.java
+@@ -116,6 +116,11 @@ public abstract class TamableAnimal extends Animal implements OwnableEntity {
+         return (this.entityData.get(DATA_FLAGS_ID) & 4) != 0;
+     }
+ 
++    @Override
++    public boolean aiLodEligible() { // Lab - AI level of detail: pets are never throttled
++        return !this.isTame() && super.aiLodEligible();
++    }
++
+     public void setTame(final boolean isTame, final boolean includeSideEffects) {
+         byte current = this.entityData.get(DATA_FLAGS_ID);
+         if (isTame) {
+diff --git a/net/minecraft/world/entity/ai/Brain.java b/net/minecraft/world/entity/ai/Brain.java
+index 946ef5b3a72d58a7f9f2cf992436b3611f71be39..81b23f7b20c0e2a7d7c4441c8010bf0900258160 100644
+--- a/net/minecraft/world/entity/ai/Brain.java
++++ b/net/minecraft/world/entity/ai/Brain.java
+@@ -411,6 +411,9 @@ public class Brain<E extends LivingEntity> {
+     }
+ 
+     public void tick(final ServerLevel level, final E body) {
++        if (body instanceof net.minecraft.world.entity.Mob mob && mob.aiLodSkipBrain()) { // Lab - AI level of detail (off by default)
++            return;
++        }
+         this.forgetOutdatedMemories();
+         this.tickSensors(level, body);
+         this.startEachNonRunningBehavior(level, body);
+diff --git a/net/minecraft/world/entity/animal/Animal.java b/net/minecraft/world/entity/animal/Animal.java
+index 0814912f7b9e6ab1f8037006a2224b57e1ef241b..b8910c121dcb046be493b7deb6427c5a93c8f29b 100644
+--- a/net/minecraft/world/entity/animal/Animal.java
++++ b/net/minecraft/world/entity/animal/Animal.java
+@@ -216,6 +216,11 @@ public abstract class Animal extends AgeableMob {
+         return this.inLove > 0;
+     }
+ 
++    @Override
++    public boolean aiLodEligible() { // Lab - AI level of detail: breeding keeps its vanilla timing
++        return !this.isInLove() && super.aiLodEligible();
++    }
++
+     public void resetLove() {
+         this.inLove = 0;
+     }
+diff --git a/net/minecraft/world/entity/animal/nautilus/Nautilus.java b/net/minecraft/world/entity/animal/nautilus/Nautilus.java
+index d6ba5f201314148a382ce71e2c570f336c5d7d40..4516508316704c9f2d6a6cb1aeb9ce08ac07869a 100644
+--- a/net/minecraft/world/entity/animal/nautilus/Nautilus.java
++++ b/net/minecraft/world/entity/animal/nautilus/Nautilus.java
+@@ -63,6 +63,13 @@ public class Nautilus extends AbstractNautilus {
+         return this.isBaby() ? BABY_DIMENSIONS : super.getDefaultDimensions(pose);
+     }
+ 
++    // Lab start - AI level of detail: an idle nautilus may tick its brain at the far rate
++    @Override
++    public boolean aiLodBrainEligible() {
++        return !this.getBrain().hasMemoryValue(net.minecraft.world.entity.ai.memory.MemoryModuleType.ATTACK_TARGET);
++    }
++    // Lab end
++
+     @Override
+     protected void customServerAiStep(final ServerLevel level) {
+         ProfilerFiller profiler = Profiler.get();
+diff --git a/net/minecraft/world/entity/monster/hoglin/Hoglin.java b/net/minecraft/world/entity/monster/hoglin/Hoglin.java
+index 3502d3de38f088c62344e189ea9e68dfe58aa28a..f3767e82de76028415090d9f7cc49728a89c6b92 100644
+--- a/net/minecraft/world/entity/monster/hoglin/Hoglin.java
++++ b/net/minecraft/world/entity/monster/hoglin/Hoglin.java
+@@ -140,6 +140,13 @@ public class Hoglin extends Animal implements Enemy, HoglinBase {
+         return (Brain<Hoglin>)super.getBrain();
+     }
+ 
++    // Lab start - AI level of detail: an idle hoglin may tick its brain at the far rate
++    @Override
++    public boolean aiLodBrainEligible() {
++        return !this.isConverting() && !this.getBrain().hasMemoryValue(net.minecraft.world.entity.ai.memory.MemoryModuleType.ATTACK_TARGET) && !this.getBrain().hasMemoryValue(net.minecraft.world.entity.ai.memory.MemoryModuleType.ANGRY_AT);
++    }
++    // Lab end
++
+     @Override
+     protected void customServerAiStep(final ServerLevel level) {
+         ProfilerFiller profiler = Profiler.get();
+diff --git a/net/minecraft/world/entity/monster/piglin/Piglin.java b/net/minecraft/world/entity/monster/piglin/Piglin.java
+index b567fc282af18836e30d5dbab6ef25fe8d58e01d..2f4e4d2cb23d497f1cdd6287e9174443cb7f8bbb 100644
+--- a/net/minecraft/world/entity/monster/piglin/Piglin.java
++++ b/net/minecraft/world/entity/monster/piglin/Piglin.java
+@@ -275,6 +275,13 @@ public class Piglin extends AbstractPiglin implements CrossbowAttackMob, Invento
+         return !this.cannotHunt;
+     }
+ 
++    // Lab start - AI level of detail: an idle piglin that is not admiring or dancing may tick its brain at the far rate
++    @Override
++    public boolean aiLodBrainEligible() {
++        return !this.getBrain().hasMemoryValue(MemoryModuleType.ADMIRING_ITEM) && !this.isDancing() && !this.getBrain().hasMemoryValue(MemoryModuleType.ATTACK_TARGET) && !this.getBrain().hasMemoryValue(MemoryModuleType.ANGRY_AT);
++    }
++    // Lab end
++
+     @Override
+     protected void customServerAiStep(final ServerLevel level) {
+         ProfilerFiller profiler = Profiler.get();
+diff --git a/net/minecraft/world/entity/npc/villager/Villager.java b/net/minecraft/world/entity/npc/villager/Villager.java
+index e6f3961f1573dffef51b8ee724a52800c8a6004b..0b06412291771e268ede781319e57486d78bda5c 100644
+--- a/net/minecraft/world/entity/npc/villager/Villager.java
++++ b/net/minecraft/world/entity/npc/villager/Villager.java
+@@ -228,6 +228,23 @@ public class Villager extends AbstractVillager implements VillagerDataHolder, Re
+         return Mob.createMobAttributes().add(Attributes.MOVEMENT_SPEED, 0.5);
+     }
+ 
++    // Lab start - AI level of detail
++    @Override
++    public boolean aiLodEligible() {
++        if (this.isTrading() || this.lastTradedPlayer != null || !super.aiLodEligible()) {
++            return false;
++        }
++
++        final Brain<Villager> brain = this.getBrain();
++        return !brain.isActive(Activity.PANIC) && !brain.isActive(Activity.RAID) && !brain.isActive(Activity.PRE_RAID) && !brain.isActive(Activity.HIDE);
++    }
++
++    @Override
++    public boolean aiLodBrainEligible() {
++        return true;
++    }
++    // Lab end
++
+     // Paper start - EAR 2
+     @Override
+     public void inactiveTick() {
+diff --git a/net/minecraft/world/entity/raid/Raider.java b/net/minecraft/world/entity/raid/Raider.java
+index 9d242f24c37fec196f06b8ef6fa29a66b2781c68..50b16810d61ea1496e412857bb472fef413a3e14 100644
+--- a/net/minecraft/world/entity/raid/Raider.java
++++ b/net/minecraft/world/entity/raid/Raider.java
+@@ -44,6 +44,11 @@ import net.minecraft.world.phys.Vec3;
+ import org.jspecify.annotations.Nullable;
+ 
+ public abstract class Raider extends PatrollingMonster {
++    @Override
++    public boolean aiLodEligible() { // Lab - AI level of detail: raids and patrols are never throttled
++        return false;
++    }
++
+     protected static final EntityDataAccessor<Boolean> IS_CELEBRATING = SynchedEntityData.defineId(Raider.class, EntityDataSerializers.BOOLEAN);
+     private static final Predicate<ItemEntity> ALLOWED_ITEMS = e -> !e.hasPickUpDelay()
+         && e.isAlive()
