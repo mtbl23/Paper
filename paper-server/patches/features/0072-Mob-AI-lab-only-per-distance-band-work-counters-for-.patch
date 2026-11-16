@@ -1,0 +1,138 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mtbl23 <mbhangal23@gmail.com>
+Date: Mon, 16 Nov 2026 14:59:54 -0500
+Subject: [PATCH] Mob AI (lab only): per distance band work counters for the AI
+ level of detail (-Dlab.aiLodStats=<file>)
+
+Counts full and light selector updates, brain ticks run and skipped, sensor
+scans and path searches per band (near, in range but far, outside); off unless
+the property is set, never to be released.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+
+diff --git a/io/papermc/paper/entity/activation/ActivationRange.java b/io/papermc/paper/entity/activation/ActivationRange.java
+index 64fd4cae0bec6f2d910c2cb2925c7231a663fc9a..e2d7e8ad6c8ae5ceef21e56b837c266194b54aec 100644
+--- a/io/papermc/paper/entity/activation/ActivationRange.java
++++ b/io/papermc/paper/entity/activation/ActivationRange.java
+@@ -160,7 +160,7 @@ public final class ActivationRange {
+             ActivationType.VILLAGER.boundingBox = player.getBoundingBox().inflate(villagerActivationRange, worldHeight, villagerActivationRange);
+ 
+             final List<Entity> entities = world.getEntities((Entity) null, ActivationRange.maxBB, e -> true);
+-            final boolean aiLod = aiLodConfig.enabled; // Lab - AI level of detail
++            final boolean aiLod = aiLodConfig.enabled || AiLod.STATS; // Lab - AI level of detail
+             final int aiLodNear = aiLodConfig.nearDistance;
+             final boolean tickMarkers = world.paperConfig().entities.markers.tick;
+             for (final Entity entity : entities) {
+diff --git a/io/papermc/paper/entity/activation/AiLod.java b/io/papermc/paper/entity/activation/AiLod.java
+index d3a96a34726ab16cae57dbfe291557ed63f5edbe..db712f09619d6b9e99987a83ef482cd01241ef77 100644
+--- a/io/papermc/paper/entity/activation/AiLod.java
++++ b/io/papermc/paper/entity/activation/AiLod.java
+@@ -27,6 +27,45 @@ public final class AiLod {
+     private AiLod() {
+     }
+ 
++    // Lab: deterministic work counters per distance band (0 near, 1 in range but far, 2 outside every player box). Only with -Dlab.aiLodStats=<file>.
++    public static final String STATS_FILE = System.getProperty("lab.aiLodStats");
++    public static final boolean STATS = STATS_FILE != null;
++    public static final String[] COUNTERS = {"targetFull", "targetLight", "goalFull", "goalLight", "brainRun", "brainSkip", "sensorScan", "pathfind", "mobTicks"};
++    private static final long[][] COUNT = new long[COUNTERS.length][3];
++    private static int firstTick = -1;
++
++    static {
++        if (STATS) {
++            Runtime.getRuntime().addShutdownHook(new Thread(AiLod::dumpStats));
++        }
++    }
++
++    public static int band(final Mob mob) {
++        final int now = MinecraftServer.currentTick;
++        if (mob.aiRangeTick != now) {
++            return 2;
++        }
++        return now - mob.aiNearTick > NEAR_HYSTERESIS ? 1 : 0;
++    }
++
++    public static void count(final int counter, final Mob mob) {
++        if (firstTick < 0) {
++            firstTick = MinecraftServer.currentTick;
++        }
++        COUNT[counter][band(mob)]++;
++    }
++
++    private static void dumpStats() {
++        try (java.io.PrintWriter pw = new java.io.PrintWriter(STATS_FILE)) {
++            pw.println("ticks " + (MinecraftServer.currentTick - firstTick));
++            for (int i = 0; i < COUNTERS.length; i++) {
++                pw.println(COUNTERS[i] + " near=" + COUNT[i][0] + " far=" + COUNT[i][1] + " outside=" + COUNT[i][2]);
++            }
++        } catch (Exception e) {
++            throw new IllegalStateException(e);
++        }
++    }
++
+     /** Called from {@link ActivationRange#activateEntities} for every entity in range of a player. */
+     static void markNear(final Entity entity, final Player player, final int near) {
+         if (!(entity instanceof final Mob mob)) {
+diff --git a/net/minecraft/world/entity/Mob.java b/net/minecraft/world/entity/Mob.java
+index 1e58ef2e75546fb74df74f961cfe399d8f1821b1..2c4f685aa0a68631c3b5324870f9c33ca40b0d13 100644
+--- a/net/minecraft/world/entity/Mob.java
++++ b/net/minecraft/world/entity/Mob.java
+@@ -878,6 +878,11 @@ public abstract class Mob extends LivingEntity implements Targeting, EquipmentUs
+         }
+         final boolean fullTargetTick = idBasedTickCount % targetRate == 0 || this.tickCount <= 1;
+         final boolean fullGoalTick = idBasedTickCount % goalRate == 0 || this.tickCount <= 1;
++        if (io.papermc.paper.entity.activation.AiLod.STATS) {
++            io.papermc.paper.entity.activation.AiLod.count(fullTargetTick ? 0 : 1, this);
++            io.papermc.paper.entity.activation.AiLod.count(fullGoalTick ? 2 : 3, this);
++            io.papermc.paper.entity.activation.AiLod.count(8, this);
++        }
+         profiler.push("targetSelector");
+         if (fullTargetTick) {
+             this.targetSelector.tick();
+diff --git a/net/minecraft/world/entity/ai/Brain.java b/net/minecraft/world/entity/ai/Brain.java
+index 81b23f7b20c0e2a7d7c4441c8010bf0900258160..0349bba63aa66071d3f27a84a43beb40194f04d6 100644
+--- a/net/minecraft/world/entity/ai/Brain.java
++++ b/net/minecraft/world/entity/ai/Brain.java
+@@ -412,8 +412,14 @@ public class Brain<E extends LivingEntity> {
+ 
+     public void tick(final ServerLevel level, final E body) {
+         if (body instanceof net.minecraft.world.entity.Mob mob && mob.aiLodSkipBrain()) { // Lab - AI level of detail (off by default)
++            if (io.papermc.paper.entity.activation.AiLod.STATS) {
++                io.papermc.paper.entity.activation.AiLod.count(5, mob);
++            }
+             return;
+         }
++        if (io.papermc.paper.entity.activation.AiLod.STATS && body instanceof net.minecraft.world.entity.Mob statMob) {
++            io.papermc.paper.entity.activation.AiLod.count(4, statMob);
++        }
+         this.forgetOutdatedMemories();
+         this.tickSensors(level, body);
+         this.startEachNonRunningBehavior(level, body);
+diff --git a/net/minecraft/world/entity/ai/navigation/PathNavigation.java b/net/minecraft/world/entity/ai/navigation/PathNavigation.java
+index f042ddf76f3a39c389e099f09dd5cb07483d2046..3f7fb128aa161008b18e0f8d342af4dc4f069603 100644
+--- a/net/minecraft/world/entity/ai/navigation/PathNavigation.java
++++ b/net/minecraft/world/entity/ai/navigation/PathNavigation.java
+@@ -193,6 +193,9 @@ public abstract class PathNavigation {
+         BlockPos fromPos = above ? this.mob.blockPosition().above() : this.mob.blockPosition();
+         int radius = (int)(maxPathLength + radiusOffset);
+         PathNavigationRegion region = new PathNavigationRegion(this.level, fromPos.offset(-radius, -radius, -radius), fromPos.offset(radius, radius, radius));
++        if (io.papermc.paper.entity.activation.AiLod.STATS) {
++            io.papermc.paper.entity.activation.AiLod.count(7, this.mob);
++        }
+         Path path = this.pathFinder.findPath(region, this.mob, targets, maxPathLength, reachRange, this.maxVisitedNodesMultiplier);
+         profiler.pop();
+         if (path != null && path.getTarget() != null) {
+diff --git a/net/minecraft/world/entity/ai/sensing/Sensor.java b/net/minecraft/world/entity/ai/sensing/Sensor.java
+index 745f26d36a30a9f570bc989b97002c2723db4ba8..39ccb87c72d6ab4a2de8cc469061a566556b0451 100644
+--- a/net/minecraft/world/entity/ai/sensing/Sensor.java
++++ b/net/minecraft/world/entity/ai/sensing/Sensor.java
+@@ -54,6 +54,9 @@ public abstract class Sensor<E extends LivingEntity> {
+         if (--this.timeToTick <= 0L) {
+             this.timeToTick = java.util.Objects.requireNonNullElse(level.paperConfig().tickRates.sensor.get(body.getType(), this.configKey), this.scanRate); // Paper - configurable sensor tick rate and timings
+             this.updateTargetingConditionRanges(body);
++            if (io.papermc.paper.entity.activation.AiLod.STATS && body instanceof net.minecraft.world.entity.Mob statMob) {
++                io.papermc.paper.entity.activation.AiLod.count(6, statMob);
++            }
+             this.doTick(level, body);
+         }
+     }
