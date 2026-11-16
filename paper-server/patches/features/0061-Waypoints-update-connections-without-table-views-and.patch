@@ -1,0 +1,142 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mtbl23 <mbhangal23@gmail.com>
+Date: Mon, 16 Nov 2026 15:01:32 -0500
+Subject: [PATCH] Waypoints: update connections without table views and skip
+ the azimuth angle when it cannot reach the send threshold
+
+
+diff --git a/net/minecraft/server/waypoints/ServerWaypointManager.java b/net/minecraft/server/waypoints/ServerWaypointManager.java
+index b9748a392c9f76e61a1b673085b4dd74c007c70d..82938d41c331a2b333bd4ca40bc5615053a08dee 100644
+--- a/net/minecraft/server/waypoints/ServerWaypointManager.java
++++ b/net/minecraft/server/waypoints/ServerWaypointManager.java
+@@ -21,6 +21,9 @@ public class ServerWaypointManager implements WaypointManager<WaypointTransmitte
+     private final Table<ServerPlayer, WaypointTransmitter, WaypointTransmitter.Connection> connections = HashBasedTable.create();
+     // Paper start - optimize ServerWaypointManager with locator bar disabled
+     public boolean locatorBarEnabled; // Avoid a gamerule lookup for each player
++    private static final ServerPlayer[] EMPTY_PLAYERS = new ServerPlayer[0]; // sub-track
++    private static final WaypointTransmitter[] EMPTY_TRANSMITTERS = new WaypointTransmitter[0]; // sub-track
++    private static final WaypointTransmitter.Connection[] EMPTY_CONNECTIONS = new WaypointTransmitter.Connection[0]; // sub-track
+ 
+     public ServerWaypointManager(net.minecraft.server.level.ServerLevel serverLevel) {
+         this.locatorBarEnabled = serverLevel.getGameRules().get(GameRules.LOCATOR_BAR);
+@@ -41,15 +44,30 @@ public class ServerWaypointManager implements WaypointManager<WaypointTransmitte
+     public void updateWaypoint(final WaypointTransmitter waypoint) {
+         if (!this.locatorBarEnabled) return; // Paper - optimize ServerWaypointManager with locator bar disabled
+         if (this.waypoints.contains(waypoint)) {
+-            Map<ServerPlayer, WaypointTransmitter.Connection> playerConnection = Tables.transpose(this.connections).row(waypoint);
+-            SetView<ServerPlayer> potentialPlayers = Sets.difference(this.players, playerConnection.keySet());
++            // sub-track: same order and snapshot semantics as the Tables.transpose / ImmutableSet.copyOf version, without the views and the copied entry set
++            final Map<ServerPlayer, WaypointTransmitter.Connection> playerConnection = this.connections.column(waypoint);
++            ServerPlayer[] connectedPlayers = EMPTY_PLAYERS;
++            WaypointTransmitter.Connection[] playerConnections = EMPTY_CONNECTIONS;
++            int count = 0;
++            for (Entry<ServerPlayer, WaypointTransmitter.Connection> waypointConnection : playerConnection.entrySet()) {
++                if (count == connectedPlayers.length) {
++                    final int newLength = Math.max(4, count << 1);
++                    connectedPlayers = java.util.Arrays.copyOf(connectedPlayers, newLength);
++                    playerConnections = java.util.Arrays.copyOf(playerConnections, newLength);
++                }
++                connectedPlayers[count] = waypointConnection.getKey();
++                playerConnections[count++] = waypointConnection.getValue();
++            }
+ 
+-            for (Entry<ServerPlayer, WaypointTransmitter.Connection> waypointConnection : ImmutableSet.copyOf(playerConnection.entrySet())) {
+-                this.updateConnection(waypointConnection.getKey(), waypoint, waypointConnection.getValue());
++            for (int i = 0; i < count; i++) {
++                this.updateConnection(connectedPlayers[i], waypoint, playerConnections[i]);
+             }
+ 
+-            for (ServerPlayer player : potentialPlayers) {
+-                this.createConnection(player, waypoint);
++            // lazily evaluated like Sets.difference: a player is skipped when it has a connection at the moment it is reached
++            for (ServerPlayer player : this.players) {
++                if (!this.connections.contains(player, waypoint)) {
++                    this.createConnection(player, waypoint);
++                }
+             }
+         }
+     }
+@@ -77,15 +95,28 @@ public class ServerWaypointManager implements WaypointManager<WaypointTransmitte
+ 
+     public void updatePlayer(final ServerPlayer player) {
+         if (!this.locatorBarEnabled) return; // Paper - optimize ServerWaypointManager with locator bar disabled
+-        Map<WaypointTransmitter, WaypointTransmitter.Connection> waypointConnections = this.connections.row(player);
+-        SetView<WaypointTransmitter> potentialWaypoints = Sets.difference(this.waypoints, waypointConnections.keySet());
++        final Map<WaypointTransmitter, WaypointTransmitter.Connection> waypointConnections = this.connections.row(player);
++        WaypointTransmitter[] transmitters = EMPTY_TRANSMITTERS;
++        WaypointTransmitter.Connection[] playerConnections = EMPTY_CONNECTIONS;
++        int count = 0;
++        for (Entry<WaypointTransmitter, WaypointTransmitter.Connection> waypointConnection : waypointConnections.entrySet()) {
++            if (count == transmitters.length) {
++                final int newLength = Math.max(4, count << 1);
++                transmitters = java.util.Arrays.copyOf(transmitters, newLength);
++                playerConnections = java.util.Arrays.copyOf(playerConnections, newLength);
++            }
++            transmitters[count] = waypointConnection.getKey();
++            playerConnections[count++] = waypointConnection.getValue();
++        }
+ 
+-        for (Entry<WaypointTransmitter, WaypointTransmitter.Connection> waypointConnection : ImmutableSet.copyOf(waypointConnections.entrySet())) {
+-            this.updateConnection(player, waypointConnection.getKey(), waypointConnection.getValue());
++        for (int i = 0; i < count; i++) {
++            this.updateConnection(player, transmitters[i], playerConnections[i]);
+         }
+ 
+-        for (WaypointTransmitter waypoint : potentialWaypoints) {
+-            this.createConnection(player, waypoint);
++        for (WaypointTransmitter waypoint : this.waypoints) {
++            if (!waypointConnections.containsKey(waypoint)) {
++                this.createConnection(player, waypoint);
++            }
+         }
+     }
+ 
+diff --git a/net/minecraft/world/waypoints/WaypointTransmitter.java b/net/minecraft/world/waypoints/WaypointTransmitter.java
+index 07af92310ee5c8bba04e6175b6faac629632e4de..981dc3a6791a465240f022e7c143bdeac6e42edb 100644
+--- a/net/minecraft/world/waypoints/WaypointTransmitter.java
++++ b/net/minecraft/world/waypoints/WaypointTransmitter.java
+@@ -77,6 +77,10 @@ public interface WaypointTransmitter extends Waypoint {
+         private final Waypoint.Icon icon;
+         private final ServerPlayer receiver;
+         private float lastAngle;
++        // sub-track: receiver minus source (x, z) at the moment lastAngle was computed, used to skip the angle computation when it cannot reach the send threshold
++        private double refDx;
++        private double refDz;
++        private double refLenSq;
+ 
+         public EntityAzimuthConnection(final LivingEntity source, final Waypoint.Icon icon, final ServerPlayer receiver) {
+             this.source = source;
+@@ -84,6 +88,9 @@ public interface WaypointTransmitter extends Waypoint {
+             this.receiver = receiver;
+             Vec3 direction = receiver.position().subtract(source.position()).rotateClockwise90();
+             this.lastAngle = (float)Mth.atan2(direction.z(), direction.x());
++            this.refDx = receiver.getX() - source.getX(); // sub-track
++            this.refDz = receiver.getZ() - source.getZ(); // sub-track
++            this.refLenSq = this.refDx * this.refDx + this.refDz * this.refDz; // sub-track
+         }
+ 
+         @Override
+@@ -105,11 +112,23 @@ public interface WaypointTransmitter extends Waypoint {
+ 
+         @Override
+         public void update() {
++            // sub-track: when the relative vector moved by under 0.2% of its length (about 0.002 rad, a quarter of the 0.0087 rad threshold, far above the
++            // table atan2 error) and the angle is not near the +-pi wrap, the angle cannot have changed enough to be sent: skip the allocations and atan2
++            final double dx = this.receiver.getX() - this.source.getX();
++            final double dz = this.receiver.getZ() - this.source.getZ();
++            final double ex = dx - this.refDx;
++            final double ez = dz - this.refDz;
++            if (ex * ex + ez * ez < 4.0E-6 * this.refLenSq && Math.abs(this.lastAngle) < 3.1F) {
++                return;
++            }
+             Vec3 direction = this.receiver.position().subtract(this.source.position()).rotateClockwise90();
+             float currentAngle = (float)Mth.atan2(direction.z(), direction.x());
+             if (Mth.abs(currentAngle - this.lastAngle) > 0.008726646F) {
+                 this.receiver.connection.send(ClientboundTrackedWaypointPacket.updateWaypointAzimuth(this.source.getUUID(), this.icon, currentAngle));
+                 this.lastAngle = currentAngle;
++                this.refDx = dx; // sub-track
++                this.refDz = dz; // sub-track
++                this.refLenSq = dx * dx + dz * dz; // sub-track
+             }
+         }
+     }
