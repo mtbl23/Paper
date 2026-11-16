@@ -1,0 +1,63 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mtbl23 <mbhangal23@gmail.com>
+Date: Mon, 16 Nov 2026 15:11:22 -0500
+Subject: [PATCH] Tier B (off by default): update far-away non-player entities
+ less often
+
+
+diff --git a/net/minecraft/server/level/ChunkMap.java b/net/minecraft/server/level/ChunkMap.java
+index e14a754e060b5f0bcb478b3bf8122eb59851f2ed..e1d76f4d71f86bd7712ae1dc69baa5fbee02e65e 100644
+--- a/net/minecraft/server/level/ChunkMap.java
++++ b/net/minecraft/server/level/ChunkMap.java
+@@ -1097,6 +1097,12 @@ public class ChunkMap extends SimpleRegionStorage implements ChunkHolder.PlayerP
+         this.iteratingTrackerEntities = true;
+         net.minecraft.network.Connection.beginBatch(); // sub-track
+         try {
++            // sub-track start - Tier B, off by default
++            final io.papermc.paper.configuration.WorldConfiguration.Entities.DistantEntityUpdates throttle = this.level.paperConfig().entities.distantEntityUpdates;
++            final boolean throttleOn = throttle.enabled && throttle.interval > 1;
++            final double throttleMinSq = (double)throttle.minDistance * (double)throttle.minDistance;
++            final long throttleTime = this.level.getGameTime();
++            // sub-track end
+             final ca.spottedleaf.moonrise.common.list.ReferenceList<net.minecraft.world.entity.Entity> trackerEntities = this.trackerEntities;
+             final Entity[] trackerEntitiesRaw = trackerEntities.getRawDataUnchecked();
+             for (int i = 0, len = trackerEntities.size(); i < len; ++i) {
+@@ -1108,6 +1114,14 @@ public class ChunkMap extends SimpleRegionStorage implements ChunkHolder.PlayerP
+                 ((ca.spottedleaf.moonrise.patches.entity_tracker.EntityTrackerTrackedEntity)tracker).moonrise$tick(((ca.spottedleaf.moonrise.patches.chunk_system.entity.ChunkSystemEntity)entity).moonrise$getChunkData().nearbyPlayers);
+                 if (((ca.spottedleaf.moonrise.patches.entity_tracker.EntityTrackerTrackedEntity)tracker).moonrise$hasPlayers()
+                     || ((ca.spottedleaf.moonrise.patches.chunk_system.entity.ChunkSystemEntity)entity).moonrise$getChunkStatus().isOrAfter(FullChunkStatus.ENTITY_TICKING)) {
++                    // sub-track start - far from every viewer, not a player, not ridden, not riding, not a projectile: update every 'interval' ticks
++                    if (throttleOn && tracker.minViewerDistSq >= throttleMinSq && tracker.minViewerDistSq != Double.MAX_VALUE
++                        && !(entity instanceof ServerPlayer) && !(entity instanceof net.minecraft.world.entity.projectile.Projectile)
++                        && !entity.isPassenger() && entity.getPassengers().isEmpty()
++                        && (throttleTime + entity.getId()) % throttle.interval != 0L) {
++                        continue;
++                    }
++                    // sub-track end
+                     tracker.serverEntity.sendChanges();
+                 }
+             }
+@@ -1268,11 +1282,13 @@ public class ChunkMap extends SimpleRegionStorage implements ChunkHolder.PlayerP
+         public final Set<ServerPlayerConnection> seenBy = new it.unimi.dsi.fastutil.objects.ReferenceOpenHashSet<>(); // Paper - Perf: optimise map impl
+ 
+         // Paper start - optimise entity tracker
++        public double minViewerDistSq = Double.MAX_VALUE; // sub-track: nearest visible player this tick (horizontal, squared)
+         private long lastChunkUpdate = -1L;
+         private ca.spottedleaf.moonrise.common.misc.NearbyPlayers.TrackedChunk lastTrackedChunk;
+ 
+         @Override
+         public final void moonrise$tick(final ca.spottedleaf.moonrise.common.misc.NearbyPlayers.TrackedChunk chunk) {
++            this.minViewerDistSq = Double.MAX_VALUE; // sub-track
+             if (chunk == null) {
+                 this.moonrise$clearPlayers();
+                 return;
+@@ -1438,6 +1454,9 @@ public class ChunkMap extends SimpleRegionStorage implements ChunkHolder.PlayerP
+                 }
+                 // CraftBukkit end
+                 if (visibleToPlayer) {
++                    if (distanceSquared < this.minViewerDistSq) { // sub-track
++                        this.minViewerDistSq = distanceSquared;
++                    }
+                     if (this.seenBy.add(player.connection)) {
+                         // Paper start - entity tracking events
+                         if (io.papermc.paper.event.player.PlayerTrackEntityEvent.getHandlerList().getRegisteredListeners().length == 0 || new io.papermc.paper.event.player.PlayerTrackEntityEvent(player.getBukkitEntity(), this.entity.getBukkitEntity()).callEvent()) {
